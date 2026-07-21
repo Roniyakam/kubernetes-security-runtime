@@ -16,6 +16,13 @@ gated on the (currently stub) `webhook/` service — see
 - The K3s nodes themselves (Falco's DaemonSet also watches host-level
   syscalls, not just container ones).
 
+## Décision de sécurité : pas de ClusterRole
+
+Falco n'a pas besoin d'un ClusterRole cluster-wide car l'enrichissement
+k8s.* provient du socket containerd local, pas d'un client API watch.
+La surface RBAC est donc nulle pour ce composant, plus restreinte que
+ce qui était anticipé dans le cadrage initial.
+
 ## Out of scope for S1
 
 - Network-layer detection (no CNI-level policy enforcement, no IDS on

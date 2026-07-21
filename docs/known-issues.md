@@ -38,6 +38,37 @@ values schema, and `helm template` output contains no gRPC-related
 resources. `falco.http_output` (auto-wired to Falcosidekick, see
 `gitops/falco/values.yaml`) is the only output configured.
 
+## `fd.rip` rejects CIDR notation — use `fd.rnet`
+
+`fd.rip` only accepts literal IP addresses; the CIDR list
+(`10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8`) in
+"Custom - Unexpected Outbound Connection"
+(`gitops/falco/custom-rules.yaml`) made Falco 0.44.1 fail rule
+compilation with `LOAD_ERR_COMPILE_CONDITION`, crash-looping the
+`falco` container on every node. Root cause: `fd.rip` is a
+single-address field; `fd.rnet` is the dedicated network/CIDR-matching
+field. Fix: replaced `fd.rip in (...)` with `fd.rnet in (...)`.
+Verified with `falco --validate` against the running 0.44.1 image
+(commit `b2baa0f`).
+
+## `fullnameOverride` doesn't cascade into the bundled `falcosidekick` subchart
+
+`falco.falcosidekickConfig` computes `http_output.url` as
+`http://<falco-fullname>-falcosidekick` (`http://falco-falcosidekick`,
+from `gitops/falco/values.yaml`'s `fullnameOverride: "falco"`) but
+never reads the `falcosidekick` subchart's own values. Root cause:
+without a matching `fullnameOverride` in
+`gitops/falcosidekick/values.yaml`, the subchart's Service defaulted
+to the release-name-derived
+`kubernetes-security-runtime-falcosidekick` — an NXDOMAIN target from
+Falco's point of view, so every alert was silently dropped before
+reaching Falcosidekick/Loki (no error logged by either side). Fix:
+pinned `falcosidekick.fullnameOverride: "falco-falcosidekick"`
+explicitly in `gitops/falcosidekick/values.yaml` to match what
+`falco.falcosidekickConfig` computes. Verified with `helm template`
+that this produces a Service name matching the computed
+`http_output.url` (commit `0f15f77`).
+
 ## Loki reachability from the K3s cluster (fixed in `devops-saas-platform`)
 
 Falcosidekick's Loki output requires reaching `vm-monitoring:3100`
