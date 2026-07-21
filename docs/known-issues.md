@@ -150,15 +150,17 @@ Deployment-backed one — **not yet observed, this entry is a
 placeholder to be filled in with the real result**, not an assumption
 either way.
 
-## S2 — image tag bootstrap in `gitops/webhook/deployment.yaml`
+## S2 — image tag bootstrap in `gitops/webhook/deployment.yaml` (resolved)
 
 `.github/workflows/ci.yml`'s `build-push-webhook` job only publishes
 an image once a commit lands on `main` (tag = that commit's SHA, never
-`latest`). The Deployment manifest that references this image is
-necessarily committed *before* that first image exists, so
-`gitops/webhook/deployment.yaml` initially ships with a placeholder
-tag (`PENDING_FIRST_BUILD`) — updated to the real SHA in a small
-follow-up commit once CI confirms the first image is published. A
+`latest`). The Deployment manifest that references this image was
+necessarily committed *before* that first image existed, so
+`gitops/webhook/deployment.yaml` briefly shipped with a placeholder
+tag (`PENDING_FIRST_BUILD`), replaced with the real SHA
+(`c84b02bb637d60391d5115f6e608c02033c00315`) in a follow-up commit
+once CI confirmed (`gh run watch`) that first image was published. A
 one-time bootstrap ordering issue, not a recurring one: every commit
-after the first has its image built before (or in the same push as)
-any manifest change referencing it.
+after this one has its image built before (or in the same push as)
+any manifest change referencing it, so no future commit needs this
+two-step dance — a normal image tag bump is a single commit.

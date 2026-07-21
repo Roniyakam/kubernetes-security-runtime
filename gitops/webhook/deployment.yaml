@@ -20,12 +20,7 @@ spec:
         runAsNonRoot: true
       containers:
         - name: webhook
-          # PENDING_FIRST_BUILD: placeholder until .github/workflows/ci.yml
-          # publishes the first image on merge to main (tagged with that
-          # commit's SHA, never "latest" — see docs/cadrage.md non-negotiable
-          # #2). Updated in a follow-up commit once that SHA is known; see
-          # docs/known-issues.md.
-          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:PENDING_FIRST_BUILD
+          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:c84b02bb637d60391d5115f6e608c02033c00315
           ports:
             - containerPort: 8080
           env:
