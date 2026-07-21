@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook
+  namespace: falco
+  labels:
+    app.kubernetes.io/name: webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: webhook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: webhook
+    spec:
+      serviceAccountName: webhook
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: webhook
+          # PENDING_FIRST_BUILD: placeholder until .github/workflows/ci.yml
+          # publishes the first image on merge to main (tagged with that
+          # commit's SHA, never "latest" — see docs/cadrage.md non-negotiable
+          # #2). Updated in a follow-up commit once that SHA is known; see
+          # docs/known-issues.md.
+          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:PENDING_FIRST_BUILD
+          ports:
+            - containerPort: 8080
+          env:
+            # Decision 13 (docs/cadrage-s2-webhook-response.md): dry-run by
+            # default. Flipped to "false" only via a committed GitOps change.
+            - name: DRY_RUN
+              value: "true"
+            - name: WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  # Populated by devops-saas-platform's
+                  # ansible/playbooks/deploy-vault-secrets.yml from
+                  # secret/kubernetes-security-runtime/webhook-token in
+                  # Vault -- never committed here (non-negotiable #4).
+                  name: webhook-token
+                  key: token
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

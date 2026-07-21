@@ -1,0 +1,18 @@
+# ClusterRole, not Role: the namespace an isolation targets is never known
+# in advance (any namespace not in PROTECTED_NAMESPACES, see webhook/app.py)
+# so a namespace-scoped Role cannot cover it without enumerating every
+# namespace up front. Documented exception to "Role by default" — decision 2,
+# docs/cadrage-s2-webhook-response.md. Verbs are the minimum this webhook
+# actually calls (webhook/app.py): read+label pods, and create/list/delete
+# NetworkPolicies for isolation/release. No other resource, no wildcards.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: webhook-isolator
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "delete", "patch"]

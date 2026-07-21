@@ -52,6 +52,23 @@ above are mapped to `ERROR`, the tier directly below `CRITICAL` — a
 deliberate choice, not an oversight; flagging it here so it isn't
 mistaken for a typo later.
 
+## S2 — réponse automatisée (`webhook/app.py`)
+
+Cadrage complet et les 13 décisions : `docs/cadrage-s2-webhook-response.md`.
+Deux points qui affectent directement la surface de ce threat model :
+
+- Seules les alertes de priorité Falco `Critical` (donc les 4 règles
+  marquées "Critical" dans la table ci-dessus — pas les 2 règles
+  "High"/`ERROR`) déclenchent une tentative d'isolation (décision 9).
+  Les règles 3 (T1068, sudo) et 6 (T1610, binaire depuis un chemin
+  inscriptible) restent détection/log uniquement en S2, comme en S1.
+- La réponse automatisée est strictement une isolation réseau
+  (label + `NetworkPolicy` deny-all ingress/egress sur le pod visé),
+  jamais une suppression de pod (décision 1) — le pod reste
+  investigable après isolation, au prix de ne pas garantir l'arrêt
+  immédiat d'un process déjà lancé (seul le réseau est coupé, pas les
+  syscalls locaux/disque).
+
 ## Known false-positive sources (S1, log-only — accepted for now)
 
 - **Rule 4** (unexpected outbound): any legitimate egress to a public

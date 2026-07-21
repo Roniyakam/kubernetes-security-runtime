@@ -39,13 +39,27 @@ falcosidekick:
       format: "json"
 
     webhook:
-      # S2 stub — webhook/app.py exists in this repo but is not deployed
-      # as a cluster Service in S1 (no Deployment/Service manifest under
-      # gitops/ yet). Left empty (= disabled) on purpose: pointing this
-      # at a nonexistent Service would just fail on every single alert.
-      # Future value once S2 ships the real Service:
-      #   http://falco-webhook.falco.svc.cluster.local:8080/events
-      address: ""
+      # S2: webhook/app.py deployed as gitops/webhook/{deployment,service}.yaml
+      # (Service "falco-webhook", namespace falco). customHeaders is
+      # deliberately absent here (it's a plain string field in this chart's
+      # values.yaml — see docs/known-issues.md — no secretKeyRef equivalent)
+      # and supplied instead at runtime via the WEBHOOK_CUSTOMHEADERS env var
+      # (extraEnv below), which the falcosidekick binary itself prefers over
+      # this yaml value. Never a plain-text token in this repo.
+      address: "http://falco-webhook.falco.svc.cluster.local:8080/webhook"
+
+    # Decision 3 (docs/cadrage-s2-webhook-response.md): shared bearer token,
+    # sourced from the same Vault-backed Secret as the webhook Deployment
+    # itself (gitops/webhook/deployment.yaml), never committed in clear
+    # here. Nested under `config:` — that's the path the chart's
+    # deployment.yaml template actually reads (.Values.config.extraEnv),
+    # verified with `helm template` against this chart version.
+    extraEnv:
+      - name: WEBHOOK_CUSTOMHEADERS
+        valueFrom:
+          secretKeyRef:
+            name: webhook-token
+            key: customheaders
 
   resources:
     requests:

@@ -112,3 +112,53 @@ from a version baked into the `falco` container image or this chart.
 dependency on macros from that default ruleset) specifically to avoid
 breaking if the fetched ruleset's macro names change between
 `falcoctl` pulls.
+
+## S2 — webhook circuit breaker is in-memory, not persisted
+
+`webhook/app.py`'s circuit breaker (decision 4,
+`docs/cadrage-s2-webhook-response.md`) keeps its 5-minute sliding
+window of real isolations as a plain in-process `deque`, not backed by
+Redis/etcd/a K8s resource. A restart of the `webhook` pod (crash,
+`kubectl rollout restart`, node eviction, `replicas: 1` reschedule)
+silently resets the count to zero. This is a deliberate scope
+trade-off for a portfolio project, not an oversight — the circuit
+breaker's job is bounding a burst of real actions during the pod's
+current lifetime, not serving as a durable audit trail (that's what
+the structured incident logs shipped to Loki are for). Do not treat
+"3 isolations since last restart" as "3 isolations in the last 5
+minutes, ever" when reading `circuit_breaker_trips_total`.
+
+## S2 — `/release` shares the same token as `/webhook`
+
+No separate analyst-only credential exists (decision 8,
+`docs/cadrage-s2-webhook-response.md`) — whoever holds the shared
+webhook token (Falcosidekick's config, or a human calling `/release`
+directly) can do both. Acceptable for a single-operator portfolio
+cluster; would need a second, narrower-scoped token before this
+pattern is reused where multiple people/services hold the token.
+
+## S2 — pod-controller behavior under isolation: pending live validation
+
+Decision 12 (`docs/cadrage-s2-webhook-response.md`): the webhook never
+deletes the isolated pod, only labels it and creates a deny-all
+`NetworkPolicy` — but nothing stops that pod's own controller
+(Deployment/ReplicaSet) from replacing it independently (e.g. a
+liveness/readiness probe failing once network egress is cut). Whether
+this actually happens, and on what timescale, is only known once the
+validation sequence runs against both a bare `kubectl run` pod and a
+Deployment-backed one — **not yet observed, this entry is a
+placeholder to be filled in with the real result**, not an assumption
+either way.
+
+## S2 — image tag bootstrap in `gitops/webhook/deployment.yaml`
+
+`.github/workflows/ci.yml`'s `build-push-webhook` job only publishes
+an image once a commit lands on `main` (tag = that commit's SHA, never
+`latest`). The Deployment manifest that references this image is
+necessarily committed *before* that first image exists, so
+`gitops/webhook/deployment.yaml` initially ships with a placeholder
+tag (`PENDING_FIRST_BUILD`) — updated to the real SHA in a small
+follow-up commit once CI confirms the first image is published. A
+one-time bootstrap ordering issue, not a recurring one: every commit
+after the first has its image built before (or in the same push as)
+any manifest change referencing it.

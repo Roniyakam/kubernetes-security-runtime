@@ -22,6 +22,21 @@ jobs:
           pip install ruff
           ruff check webhook/
 
+  pytest:
+    name: pytest (webhook/)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Run webhook unit tests
+        run: |
+          pip install -r webhook/requirements-dev.txt
+          pytest webhook/tests/
+
   yaml-lint:
     name: yaml-lint
     runs-on: ubuntu-latest
@@ -54,7 +69,7 @@ jobs:
 
   security-summary:
     name: Security gate summary
-    needs: [ruff, yaml-lint, secret-scan]
+    needs: [ruff, pytest, yaml-lint, secret-scan]
     runs-on: ubuntu-latest
     if: always()
     permissions:
@@ -63,12 +78,38 @@ jobs:
       - name: Security gate summary
         run: |
           echo "ruff: ${{ needs.ruff.result }}"
+          echo "pytest: ${{ needs.pytest.result }}"
           echo "yaml-lint: ${{ needs.yaml-lint.result }}"
           echo "secret-scan: ${{ needs.secret-scan.result }}"
           if [[ "${{ needs.ruff.result }}" != "success" ]] || \
+             [[ "${{ needs.pytest.result }}" != "success" ]] || \
              [[ "${{ needs.yaml-lint.result }}" != "success" ]] || \
              [[ "${{ needs.secret-scan.result }}" != "success" ]]; then
             echo "GATE FAILED - merge blocked"
             exit 1
           fi
           echo "All gates passed"
+
+  build-push-webhook:
+    name: build + push webhook image
+    needs: [ruff, pytest, yaml-lint, secret-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Image signing (cosign) is deliberately out of scope for this project —
+      # that belongs to the separate supply-chain-devsecops-pipeline portfolio piece.
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:${{ github.sha }}

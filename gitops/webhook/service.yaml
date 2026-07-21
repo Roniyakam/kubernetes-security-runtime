@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  # Name relied upon by gitops/falcosidekick/values.yaml's webhook.address
+  # (http://falco-webhook.falco.svc.cluster.local:8080/webhook) -- keep in
+  # sync if renamed.
+  name: falco-webhook
+  namespace: falco
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: webhook
+  ports:
+    - port: 8080
+      targetPort: 8080

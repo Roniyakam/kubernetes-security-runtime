@@ -1,0 +1,8 @@
+# kubernetes==29.0.0: aligned to K3s v1.29.4 (this cluster's server minor
+# version) per the official kubernetes-client/python compatibility policy —
+# see docs/cadrage-s2-webhook-response.md. Not "latest" (36.x at time of
+# writing) to avoid drifting ahead of what the server actually speaks.
+kubernetes==29.0.0
+fastapi==0.139.2
+uvicorn[standard]==0.51.0
+prometheus_client==0.25.0
