@@ -3,11 +3,17 @@
 # not a standalone Helm release. Merged as an additional valueFile into
 # the same "falco" release (see gitops/falco/application.yaml).
 #
-# falco.http_output is auto-wired to this subchart's Service by the
-# falco chart itself (falco.falcosidekickConfig helper) as soon as
-# falcosidekick.enabled: true is set in ../falco/values.yaml — nothing to
-# configure here for that leg.
+# falco.http_output is auto-wired by the falco chart's
+# falco.falcosidekickConfig helper to http://<falco fullname>-falcosidekick
+# (here: http://falco-falcosidekick, per ../falco/values.yaml's
+# fullnameOverride: "falco"). That helper does NOT read this subchart's own
+# values, so the subchart's Service must be pinned to the same name below —
+# otherwise it defaults to `<release-name>-falcosidekick`
+# (kubernetes-security-runtime-falcosidekick) and every Falco event fails
+# to reach it (silent DNS failure, no error logged by either side).
 falcosidekick:
+  fullnameOverride: "falco-falcosidekick"
+
   replicaCount: 1
 
   service:

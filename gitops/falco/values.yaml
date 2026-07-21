@@ -3,10 +3,13 @@
 # 2026-07-21. Falco 0.44 removed grpc_output entirely — do NOT reintroduce
 # a grpc_output block here (see docs/known-issues.md).
 #
-# fullnameOverride pins every child resource name to "falco" regardless of
-# the ArgoCD Application's own metadata.name (which is "kubernetes-security-
-# runtime" per Task 0) — keeps the Falcosidekick service name short and
-# predictable: falco-falcosidekick.falco.svc.cluster.local:2801.
+# fullnameOverride pins every child resource of *this* chart (the falco
+# DaemonSet itself) to "falco" regardless of the ArgoCD Application's own
+# metadata.name (which is "kubernetes-security-runtime" per Task 0). It
+# does NOT cascade into the bundled falcosidekick subchart — that chart's
+# own fullnameOverride (set explicitly in ../falcosidekick/values.yaml) is
+# what actually determines the Service name that falco.http_output.url
+# points to: falco-falcosidekick.falco.svc.cluster.local:2801.
 fullnameOverride: "falco"
 
 driver:
