@@ -1,0 +1,127 @@
+# 6 custom MITRE ATT&CK-mapped Falco rules for S1 — detection/log only.
+# No `responseActions`/Falco Talon is enabled anywhere in this repo, so
+# these rules can never trigger an automated response (kill/pause/etc.);
+# they only produce alerts consumed by Falcosidekick -> Loki. Automated
+# response is explicitly out of scope for S1 (see docs/cadrage.md) and
+# lands in S2 with the webhook/ service.
+#
+# Priority mapping note: Falco's priority enum has no native "High" level
+# (valid values: emergency, alert, critical, error, warning, notice,
+# informational, debug). Rules scoped "High" in docs/threat-model.md are
+# mapped to ERROR here — the tier directly below CRITICAL.
+#
+# All conditions are self-contained (no dependency on macros from Falco's
+# own falcoctl-fetched default ruleset), so they don't break if that
+# ruleset's macro names change between Falco versions.
+customRules:
+  rules-mitre-attack.yaml: |-
+    - rule: Custom - Shell Spawned in Container
+      desc: >
+        Interactive or non-interactive shell process spawned inside a
+        running container. Usually the first observable step of a
+        container compromise (reverse shell, kubectl exec by an
+        attacker with stolen credentials).
+      condition: >
+        evt.type = execve and evt.dir = < and
+        container.id != host and
+        proc.name in (bash, sh, zsh, ash, dash, ksh, csh, tcsh, fish)
+      output: >
+        Shell spawned in container (user=%user.name container=%container.name
+        image=%container.image.repository proc=%proc.name
+        parent=%proc.pname cmdline=%proc.cmdline k8s.ns=%k8s.ns.name
+        k8s.pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [T1059, mitre_execution, kubernetes-security-runtime]
+
+    - rule: Custom - New User Created in Container
+      desc: >
+        User/group management binary executed inside a running container.
+        Containers are expected to be immutable — account creation at
+        runtime is abnormal and a common persistence technique.
+      condition: >
+        evt.type = execve and evt.dir = < and
+        container.id != host and
+        proc.name in (useradd, adduser, userdel, usermod, groupadd, groupdel, groupmod)
+      output: >
+        User/group management binary run in container (user=%user.name
+        container=%container.name image=%container.image.repository
+        proc=%proc.name cmdline=%proc.cmdline k8s.ns=%k8s.ns.name
+        k8s.pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [T1136, mitre_persistence, kubernetes-security-runtime]
+
+    - rule: Custom - Sudo Usage in Pod
+      desc: >
+        sudo executed inside a container. Containers should run as a
+        single fixed UID; sudo usage indicates either a privilege
+        escalation attempt or an image shipping unnecessary OS tooling.
+      condition: >
+        evt.type = execve and evt.dir = < and
+        container.id != host and
+        proc.name = sudo
+      output: >
+        Sudo run inside container (user=%user.name container=%container.name
+        image=%container.image.repository cmdline=%proc.cmdline
+        k8s.ns=%k8s.ns.name k8s.pod=%k8s.pod.name)
+      priority: ERROR
+      tags: [T1068, mitre_privilege_escalation, kubernetes-security-runtime]
+
+    - rule: Custom - Unexpected Outbound Connection
+      desc: >
+        Container process opened an outbound TCP connection to an IP
+        outside the cluster's private address ranges. Flags potential
+        C2/exfiltration traffic. S1 default is intentionally broad (no
+        per-workload allowlist yet) — expect noise; tune before treating
+        as high-confidence (see docs/known-issues.md).
+      condition: >
+        evt.type = connect and evt.dir = < and
+        container.id != host and
+        fd.typechar = 4 and
+        not (fd.rip in (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8))
+      output: >
+        Unexpected outbound connection from container (user=%user.name
+        container=%container.name image=%container.image.repository
+        proc=%proc.name connection=%fd.name k8s.ns=%k8s.ns.name
+        k8s.pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [T1048, mitre_exfiltration, kubernetes-security-runtime]
+
+    - rule: Custom - Write to Sensitive Account File
+      desc: >
+        Write to /etc/passwd or /etc/shadow inside a container. Classic
+        technique for planting a backdoor account or hash (Account
+        Manipulation).
+      condition: >
+        evt.type in (open, openat, creat) and evt.dir = < and
+        container.id != host and
+        fd.name in (/etc/passwd, /etc/shadow) and
+        evt.is_open_write = true
+      output: >
+        Write to sensitive account file in container (user=%user.name
+        container=%container.name image=%container.image.repository
+        proc=%proc.name file=%fd.name k8s.ns=%k8s.ns.name
+        k8s.pod=%k8s.pod.name)
+      priority: CRITICAL
+      tags: [T1098, mitre_persistence, kubernetes-security-runtime]
+
+    - rule: Custom - Unexpected Binary Execution From Writable Path
+      desc: >
+        Binary executed from a world-writable or temp directory (/tmp,
+        /var/tmp, /dev/shm, /run) inside a container. Containers are
+        expected to be immutable; a binary appearing and running from a
+        writable path at runtime is drift from the built image —
+        commonly a dropped-and-executed payload.
+      condition: >
+        evt.type = execve and evt.dir = < and
+        container.id != host and
+        (proc.exepath startswith /tmp or
+         proc.exepath startswith /var/tmp or
+         proc.exepath startswith /dev/shm or
+         proc.exepath startswith /run)
+      output: >
+        Binary executed from writable path in container (user=%user.name
+        container=%container.name image=%container.image.repository
+        proc=%proc.name exe=%proc.exepath cmdline=%proc.cmdline
+        k8s.ns=%k8s.ns.name k8s.pod=%k8s.pod.name)
+      priority: ERROR
+      tags: [T1610, mitre_defense_evasion, kubernetes-security-runtime]

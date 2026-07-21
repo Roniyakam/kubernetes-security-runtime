@@ -1,0 +1,47 @@
+# Falco — chart falcosecurity/falco 9.1.0 (appVersion 0.44.1), verified
+# against `helm show values falcosecurity/falco --version 9.1.0` on
+# 2026-07-21. Falco 0.44 removed grpc_output entirely — do NOT reintroduce
+# a grpc_output block here (see docs/known-issues.md).
+#
+# fullnameOverride pins every child resource name to "falco" regardless of
+# the ArgoCD Application's own metadata.name (which is "kubernetes-security-
+# runtime" per Task 0) — keeps the Falcosidekick service name short and
+# predictable: falco-falcosidekick.falco.svc.cluster.local:2801.
+fullnameOverride: "falco"
+
+driver:
+  # auto would also resolve to modern_ebpf on this cluster's kernel, but we
+  # pin it explicitly per cadrage.md — no kernel-module fallback, no DKMS/
+  # headers dependency on the K3s nodes.
+  kind: modern_ebpf
+  modernEbpf:
+    # Runs as non-privileged (CAP_BPF/CAP_PERFMON/CAP_SYS_PTRACE) instead of
+    # a fully privileged container.
+    leastPrivileged: true
+
+# Falcosidekick is a bundled subchart of falcosecurity/falco (condition:
+# falcosidekick.enabled, pinned to 0.12.* by chart 9.1.0 — see
+# docs/known-issues.md for the version-pin caveat vs. the standalone 0.14.0
+# chart). Enabling it here auto-wires falco.http_output (enabled + url) to
+# the bundled Falcosidekick service via the chart's own
+# `falco.falcosidekickConfig` helper — do NOT set http_output.url manually,
+# and do NOT set grpc_output (removed in 0.44, see cadrage.md correction).
+# Falcosidekick's own config (Loki output, Webhook stub, service) lives in
+# ../falcosidekick/values.yaml, merged into this same Helm release as an
+# additional valueFile (see gitops/falco/application.yaml).
+falcosidekick:
+  enabled: true
+
+# Custom MITRE-mapped rules — see custom-rules.yaml (merged as an
+# additional valueFile into this same release, kept in its own file for
+# reviewability). Falco's own falcoctl-fetched default ruleset (incl. the
+# stock "Terminal shell in container" rule) still loads alongside these.
+customRules: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1024Mi

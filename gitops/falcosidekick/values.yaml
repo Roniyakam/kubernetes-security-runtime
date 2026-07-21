@@ -1,0 +1,50 @@
+# Falcosidekick config — nested under `falcosidekick:` because it is a
+# bundled subchart of falcosecurity/falco (see ../falco/values.yaml),
+# not a standalone Helm release. Merged as an additional valueFile into
+# the same "falco" release (see gitops/falco/application.yaml).
+#
+# falco.http_output is auto-wired to this subchart's Service by the
+# falco chart itself (falco.falcosidekickConfig helper) as soon as
+# falcosidekick.enabled: true is set in ../falco/values.yaml — nothing to
+# configure here for that leg.
+falcosidekick:
+  replicaCount: 1
+
+  service:
+    type: ClusterIP
+    port: 2801
+
+  config:
+    loki:
+      # vm-monitoring, outside the K3s cluster (Docker Compose stack —
+      # see devops-saas-platform/ansible/roles/monitoring). Reused
+      # as-is, no second Loki instance deployed for this project.
+      # Real IP committed here is a deliberate S1 trade-off for this
+      # portfolio cluster (UFW on vm-monitoring only accepts traffic
+      # from vm-k8s-master/vm-k8s-worker on :3100 either way) — see
+      # docs/known-issues.md for the follow-up (internal DNS / K8s
+      # ExternalName Service) planned before this pattern is reused
+      # on non-portfolio infrastructure.
+      hostport: "http://51.15.199.56:3100"
+      # Grafana Explore query for validation: {source="syscall"} — NOT
+      # {job="falco"}. Falcosidekick's Loki output does not set a "job"
+      # label by default; its built-in labels are rule/source/priority
+      # (see docs/known-issues.md for the corrected validation query).
+      format: "json"
+
+    webhook:
+      # S2 stub — webhook/app.py exists in this repo but is not deployed
+      # as a cluster Service in S1 (no Deployment/Service manifest under
+      # gitops/ yet). Left empty (= disabled) on purpose: pointing this
+      # at a nonexistent Service would just fail on every single alert.
+      # Future value once S2 ships the real Service:
+      #   http://falco-webhook.falco.svc.cluster.local:8080/events
+      address: ""
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

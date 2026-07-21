@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ruff:
+    name: ruff (webhook/)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Lint Python with ruff
+        run: |
+          pip install ruff
+          ruff check webhook/
+
+  yaml-lint:
+    name: yaml-lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Lint all YAML files
+        run: |
+          pip install yamllint
+          yamllint gitops/
+          # auto-discovers .yamllint.yml from repo root
+
+  secret-scan:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0 # full history required by gitleaks
+      - name: Scan for secrets with gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz
+          ./gitleaks detect --source . --verbose
+
+  security-summary:
+    name: Security gate summary
+    needs: [ruff, yaml-lint, secret-scan]
+    runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Security gate summary
+        run: |
+          echo "ruff: ${{ needs.ruff.result }}"
+          echo "yaml-lint: ${{ needs.yaml-lint.result }}"
+          echo "secret-scan: ${{ needs.secret-scan.result }}"
+          if [[ "${{ needs.ruff.result }}" != "success" ]] || \
+             [[ "${{ needs.yaml-lint.result }}" != "success" ]] || \
+             [[ "${{ needs.secret-scan.result }}" != "success" ]]; then
+            echo "GATE FAILED - merge blocked"
+            exit 1
+          fi
+          echo "All gates passed"
