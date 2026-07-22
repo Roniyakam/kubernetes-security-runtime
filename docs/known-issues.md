@@ -232,3 +232,14 @@ Once either is in place and validated against both namespaces, remove
 `celery`/`rabbitmq` from `NOISY_PROBE_NAMESPACES` — this list is a
 temporary mitigation, not a permanent design choice like
 `CRITICAL_NAMESPACES`.
+
+**Systemic observation (2026-07-22, live traffic)**: the same
+exec-probe false-positive pattern is also observed live against
+`vault` (`vault-0`, protected via `CRITICAL_NAMESPACES` for blast-radius
+reasons, independent of this trade-off) — rule 1 is tripping on
+kubelet-issued probe execs in at least three namespaces now
+(`vault`, `celery`, `rabbitmq`), not just the two patched here. This
+confirms the false-positive rate is a property of rule 1 itself, not
+an artifact specific to celery/rabbitmq's workload — the eventual fix
+(probe-aware exclusion or process-lineage detection) noted above
+applies cluster-wide, not just to these two namespaces.
