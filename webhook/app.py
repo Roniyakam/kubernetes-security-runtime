@@ -43,7 +43,13 @@ WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() == "true"
 
 # Decision 11: never isolate in these namespaces, whatever the alert.
-PROTECTED_NAMESPACES = {"argocd", "vault", "kube-system", "falco"}
+# celery/rabbitmq added after live S2 validation (2026-07-22, see
+# docs/known-issues.md): their exec-based liveness/readiness probes
+# (a shell invoked every 5-15s) trip "Shell Spawned in Container"
+# continuously, and isolating either would break real message/task
+# processing in devops-saas-platform -- same blast-radius logic as the
+# original four, not a scope creep.
+PROTECTED_NAMESPACES = {"argocd", "vault", "kube-system", "falco", "celery", "rabbitmq"}
 
 QUARANTINE_LABEL = "security.internal/quarantine-target"
 
