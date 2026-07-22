@@ -270,7 +270,15 @@ que côté GRC en entretien.
       `networkpolicies.networking.k8s.io [get list create delete patch]`
       uniquement — correspond exactement au `ClusterRole
       webhook-isolator`, aucun `delete` sur les pods, aucun `exec`,
-      aucun wildcard)
+      aucun wildcard).
+      **Correction (même jour, après audit du code)** : `list` sur
+      `pods` n'était jamais appelé par `webhook/app.py` (seuls `get`
+      et `patch` le sont ; `list` sur `networkpolicies`, lui, est
+      utilisé par `/release` et reste justifié) — retiré du
+      `ClusterRole`, voir `docs/known-issues.md`. Re-vérifié après
+      resync GitOps : `pods [get patch]`,
+      `networkpolicies.networking.k8s.io [get list create delete
+      patch]` inchangé.
 - [x] Authentification testée : une requête sans le secret attendu
       vers le webhook est rejetée (401/403), pas silencieusement
       acceptée (validé 22/07/2026 : requête avec un `Bearer` invalide
@@ -278,9 +286,27 @@ que côté GRC en entretien.
       `auth_failures_total` incrémenté)
 - [ ] Un incident structuré est visible dans Loki
       (`job="webhook-incidents"`) après un scénario simulé, avec tous
-      les champs attendus (règle, technique MITRE, résultat)
-- [ ] Déduplication vérifiée : 3 événements dupliqués en 5 secondes
+      les champs attendus (règle, technique MITRE, résultat).
+      **Testé le 22/07/2026, non concluant** : `job="webhook-incidents"`
+      ne retourne aucun résultat — Loki n'a même pas de label `job`
+      (`labels` API : `hostname`, `k8s_ns_name`, `k8s_pod_name`,
+      `priority`, `rule`, `service_name`, `source`, `tags`). Cause
+      racine identifiée : aucun agent de log-shipping (Promtail/Fluent
+      Bit/Vector) ne tourne dans ce cluster K3s — seul Falcosidekick
+      pousse vers Loki, en direct, pour ses propres événements Falco.
+      Le JSON structuré du webhook est bien écrit et correct (vérifié
+      via `kubectl logs`) mais n'atteint jamais Loki. Détail complet et
+      pistes de correction : `docs/known-issues.md`. Reste
+      délibérément décoché : la fonctionnalité n'est pas fermée, pas
+      juste mal étiquetée.
+- [x] Déduplication vérifiée : 3 événements dupliqués en 5 secondes
       sur le même pod ne comptent que pour 1 dans le circuit breaker
+      (validé 22/07/2026 : pod unique `dedup-test-1`, 3 déclenchements
+      réels en ~3 secondes ; 1er → `action="isolated"`, 2e et 3e →
+      `action="deduplicated"`/`result="skipped"` ; une seule
+      `NetworkPolicy` créée, `/metrics` confirmant
+      `isolations_total=1`, `circuit_breaker_trips_total=0` après les
+      3 déclenchements — détail complet dans `docs/known-issues.md`)
 - [x] `POST /release` testé : lève la quarantaine, supprime la
       NetworkPolicy, vérifié par un `kubectl get pod` sans label
       résiduel (validé 22/07/2026 : pod isolé `cb-test-1` libéré via
@@ -297,13 +323,21 @@ que côté GRC en entretien.
       8080 ClusterIP et NodePort `:30090` — mêmes valeurs sur les
       deux : `isolations_total=3`, `circuit_breaker_trips_total=1`,
       `auth_failures_total=1`, cohérent avec les tests ci-dessus)
-- [ ] Namespaces protégés testés : un événement critique simulé dans
+- [x] Namespaces protégés testés : un événement critique simulé dans
       `argocd` ou `vault` ne déclenche aucune isolation, seulement une
-      alerte "action refusée, namespace protégé"
-- [ ] Comportement de redémarrage observé et documenté : le pod isolé
+      alerte "action refusée, namespace protégé" (déjà couvert par
+      l'étape 2 de la session de validation live du 22/07/2026 : 44
+      entrées réelles `refused_protected_namespace` sur `vault-0`,
+      trafic de probes exec-based réel, pas un événement simulé —
+      preuve plus forte qu'un test synthétique unique)
+- [x] Comportement de redémarrage observé et documenté : le pod isolé
       est-il effectivement redémarré par son contrôleur pendant le
       test ? Résultat réel noté dans `docs/known-issues.md`, pas
-      supposé à l'avance
+      supposé à l'avance (voir `docs/known-issues.md`, section
+      "S2 — pod-controller behavior under isolation" / décision 12 :
+      testé en live le 22/07/2026, le pod n'a jamais été redémarré —
+      cause racine identifiée, propriété de l'enforcement
+      `NetworkPolicy` de k3s, pas une garantie Kubernetes générale)
 - [ ] Mode dry-run vérifié : avec `DRY_RUN=true`, un événement
       critique simulé produit un log "aurait isolé X" sans
       NetworkPolicy réellement créée

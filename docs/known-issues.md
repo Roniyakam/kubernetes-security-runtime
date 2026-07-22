@@ -288,3 +288,98 @@ confirms the false-positive rate is a property of rule 1 itself, not
 an artifact specific to celery/rabbitmq's workload — the eventual fix
 (probe-aware exclusion or process-lineage detection) noted above
 applies cluster-wide, not just to these two namespaces.
+
+## S2 — same-pod event deduplication (decision 7): confirmed working, live validation, 2026-07-22
+
+Distinct from the circuit-breaker test above (which used 4 different
+pods to trip the threshold). This tested decision 7's dedup path
+specifically: one disposable pod (`dedup-test-1`, `nginx:1.27`,
+namespace `default`), `DRY_RUN=false` temporarily via GitOps
+(`test(s2): activation réelle temporaire... gaps 1-2`, reverted in
+`test(s2): retour DRY_RUN=true... gaps 1-2`), a real shell spawned on
+it three times within ~3 seconds via `kubectl exec ... sh`.
+
+**Result**: first exec → `action="isolated"`, `result="isolated"`,
+`latency_ms=81.67`. Second and third execs (14:39:08.85Z and
+14:39:10.24Z) → `action="deduplicated"`, `result="skipped"` both
+times, no `latency_ms` (short-circuited before the timed section, per
+`webhook/app.py`). `kubectl get networkpolicy -n default` showed
+exactly one `NetworkPolicy` (`quarantine-dedup-test-1`) throughout, and
+`/metrics` after the run read `isolations_total=1`,
+`circuit_breaker_trips_total=0` — confirming the second/third triggers
+never reached the isolation code path or the circuit breaker counter,
+exactly as decision 7 specifies. Test pod and its `NetworkPolicy`
+deleted after validation.
+
+## S2 — Loki incident visibility (decision 6): label guess was wrong, and the underlying transport doesn't exist
+
+Decision 6 (`docs/cadrage-s2-webhook-response.md`) assumed the
+webhook's structured `log_incident()` JSON (stdout, `"log_type":
+"webhook_incident"`) would reach Loki as `{job="webhook-incidents"}`
+via "the same stdout-scrape mechanism Falcosidekick's own Loki output
+relies on" (see `webhook/app.py`'s module docstring, written before
+this was verified). This assumption does not hold on this cluster.
+
+**Verified directly, live validation 2026-07-22 (same test window as
+the dedup test above)**: `curl` against Loki's label API
+(`$LOKI/loki/api/v1/labels`) returns exactly `hostname`, `k8s_ns_name`,
+`k8s_pod_name`, `priority`, `rule`, `service_name`, `source`, `tags` —
+**no `job` label exists in Loki at all**, and
+`{job="webhook-incidents"}` returns zero results for the test window.
+Meanwhile `{source="syscall"} |= "dedup-test-1"` returns the expected
+three raw Falco events for the same test (confirming Loki itself and
+the query path both work fine).
+
+**Root cause**: Falcosidekick's Loki output (`gitops/falcosidekick/values.yaml`,
+`loki.hostport`) is a direct HTTP push made by the Falcosidekick pod
+itself, driven by the Falco alert it already received in-process — it
+is not a generic log-shipping agent and never touches any other pod's
+stdout. There is no Promtail/Fluent Bit/Vector/Grafana Agent — or any
+other log-shipping DaemonSet — anywhere in this K3s cluster (`kubectl
+get daemonset -A` shows only the `falco` DaemonSet itself; `kubectl get
+deployment,statefulset -A` shows no such workload in any namespace;
+`helm list -A` shows only `vault` besides what ArgoCD manages). The
+webhook's own stdout is only visible via `kubectl logs`, ordinary
+container-runtime log files on the node — it never reaches Loki under
+any label, `job="webhook-incidents"` or otherwise.
+
+**Practical consequence**: decision 6's audit trail exists (the JSON is
+written, structured, and correct — verified via `kubectl logs` during
+this same test, showing `falco_rule`, `mitre_technique`, `namespace`,
+`pod_name`, `action`, `result` all populated correctly), but it is not
+centrally queryable in Loki as designed, and does not survive the
+webhook pod's log retention/rotation on the node the way S1's Falco
+alerts survive in Loki for 15 days. This is a real, unclosed gap, not
+a documentation-only correction. Closing it for real would need either:
+a log-shipping DaemonSet added to the cluster (disproportionate
+operational surface for one pod's structured logs, mirrors the
+CRD-controller trade-off already declined in the SOAR maturity note),
+or the webhook pushing directly to Loki's push API
+(`/loki/api/v1/push`) itself, the same pattern Falcosidekick already
+uses for its own output. Neither is implemented; `docs/cadrage-s2-webhook-response.md`'s
+checklist item for this is intentionally left unchecked rather than
+marked done against a query that returns nothing.
+
+## S2 — RBAC `list` on pods was unused, removed (least-privilege tightening, 2026-07-22)
+
+`gitops/webhook/clusterrole.yaml`'s `webhook-isolator` `ClusterRole`
+originally granted `["get", "list", "patch"]` on `pods`. Checked
+directly against `webhook/app.py`: the only pod calls anywhere in the
+code are `read_namespaced_pod` (`get`, used for decision 7's dedup
+check) and `patch_namespaced_pod` (label patch, both the isolate and
+`/release` paths) — `list_namespaced_pod` is never called. `list` on
+`networkpolicies`, by contrast, **is** used
+(`list_namespaced_network_policy` in `/release`, to find the
+quarantine `NetworkPolicy` by label selector before deleting it), so
+that verb stays.
+
+Tightened `pods` to `["get", "patch"]` (`gitops/webhook/clusterrole.yaml`,
+commit `fix(s2): retire 'list' inutilisé sur pods...`). Re-verified
+live after the GitOps change synced:
+`kubectl auth can-i --list --as=system:serviceaccount:falco:webhook`
+now reads `pods [get patch]` / `networkpolicies.networking.k8s.io [get
+list create delete patch]` — matching exactly what the code calls, one
+verb narrower than the RBAC audit originally recorded in
+`docs/cadrage-s2-webhook-response.md`. A correction to an already-live
+RBAC grant, not a change in behavior: nothing in `webhook/app.py` ever
+relied on listing pods.
