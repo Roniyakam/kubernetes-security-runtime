@@ -250,30 +250,53 @@ que côté GRC en entretien.
 
 ## Validation attendue en fin de S2
 
-- [ ] Scénario simulé : événement critique déclenché, isolation
+- [x] Scénario simulé : événement critique déclenché, isolation
       appliquée et mesurée en moins de 10 secondes, chiffré et
-      documenté (pas d'affirmation sans mesure)
-- [ ] Scénario faux positif : un 4e déclenchement en moins de 5
+      documenté (pas d'affirmation sans mesure) (validé 22/07/2026 :
+      `latency_ms` journalisé pour les 3 isolations réelles du test
+      circuit breaker — `cb-test-1` 106.07 ms, `cb-test-2` 30.55 ms,
+      `cb-test-3` 114.61 ms — largement sous les 10 secondes)
+- [x] Scénario faux positif : un 4e déclenchement en moins de 5
       minutes ne déclenche pas de 4e isolation, bascule vérifiée en
-      mode alerte seule
-- [ ] RBAC audité :
+      mode alerte seule (validé 22/07/2026 : 4 pods jetables dans
+      `default`, 4 événements réels en 14 secondes ; les 3 premiers
+      isolés, le 4e journalise `circuit_breaker_tripped`/`alert_only`,
+      seulement 3 `NetworkPolicy` créées, confirmé par
+      `kubectl get networkpolicy -n default`)
+- [x] RBAC audité :
       `kubectl auth can-i --list --as=system:serviceaccount:falco:webhook`
-      confirme le périmètre exact, rien de plus
-- [ ] Authentification testée : une requête sans le secret attendu
+      confirme le périmètre exact, rien de plus (validé 22/07/2026 :
+      `pods [get list patch]` et
+      `networkpolicies.networking.k8s.io [get list create delete patch]`
+      uniquement — correspond exactement au `ClusterRole
+      webhook-isolator`, aucun `delete` sur les pods, aucun `exec`,
+      aucun wildcard)
+- [x] Authentification testée : une requête sans le secret attendu
       vers le webhook est rejetée (401/403), pas silencieusement
-      acceptée
+      acceptée (validé 22/07/2026 : requête avec un `Bearer` invalide
+      sur `/webhook` → 401 `{"detail":"unauthorized"}`,
+      `auth_failures_total` incrémenté)
 - [ ] Un incident structuré est visible dans Loki
       (`job="webhook-incidents"`) après un scénario simulé, avec tous
       les champs attendus (règle, technique MITRE, résultat)
 - [ ] Déduplication vérifiée : 3 événements dupliqués en 5 secondes
       sur le même pod ne comptent que pour 1 dans le circuit breaker
-- [ ] `POST /release` testé : lève la quarantaine, supprime la
+- [x] `POST /release` testé : lève la quarantaine, supprime la
       NetworkPolicy, vérifié par un `kubectl get pod` sans label
-      résiduel
-- [ ] `pytest webhook/tests/` : 100% des tests passent, exécuté en
-      CI, pas seulement en local
-- [ ] `curl http://webhook:8080/metrics` : les 3 compteurs sont
-      présents et incrémentent après un scénario simulé
+      résiduel (validé 22/07/2026 : pod isolé `cb-test-1` libéré via
+      `POST /release` authentifié, `quarantine-cb-test-1` supprimée,
+      labels `quarantine`/`security.internal/quarantine-target`
+      absents de `kubectl get pod --show-labels`)
+- [x] `pytest webhook/tests/` : 100% des tests passent, exécuté en
+      CI, pas seulement en local (validé 22/07/2026 : job `pytest
+      (webhook/)` vert sur le dernier run CI, `gh run list`, inclut
+      `test_noisy_probe_namespace_is_refused`)
+- [x] `curl http://webhook:8080/metrics` : les 3 compteurs sont
+      présents et incrémentent après un scénario simulé (validé
+      22/07/2026 sur les deux endpoints exposant `/metrics` — port
+      8080 ClusterIP et NodePort `:30090` — mêmes valeurs sur les
+      deux : `isolations_total=3`, `circuit_breaker_trips_total=1`,
+      `auth_failures_total=1`, cohérent avec les tests ci-dessus)
 - [ ] Namespaces protégés testés : un événement critique simulé dans
       `argocd` ou `vault` ne déclenche aucune isolation, seulement une
       alerte "action refusée, namespace protégé"
