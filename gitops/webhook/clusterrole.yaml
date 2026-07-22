@@ -3,8 +3,12 @@
 # so a namespace-scoped Role cannot cover it without enumerating every
 # namespace up front. Documented exception to "Role by default" — decision 2,
 # docs/cadrage-s2-webhook-response.md. Verbs are the minimum this webhook
-# actually calls (webhook/app.py): read+label pods, and create/list/delete
-# NetworkPolicies for isolation/release. No other resource, no wildcards.
+# actually calls (webhook/app.py): read (get, for dedup)+label (patch) pods;
+# create/list (for /release's label-selector lookup)/delete NetworkPolicies.
+# "list" on pods was removed 2026-07-22 (least-privilege tightening, see
+# docs/known-issues.md) after confirming app.py never calls
+# list_namespaced_pod — only read_namespaced_pod (get) and
+# patch_namespaced_pod. No other resource, no wildcards.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -12,7 +16,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "patch"]
+    verbs: ["get", "patch"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list", "create", "delete", "patch"]
