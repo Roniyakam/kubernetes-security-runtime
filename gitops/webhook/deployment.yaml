@@ -18,9 +18,10 @@ spec:
       serviceAccountName: webhook
       securityContext:
         runAsNonRoot: true
+        runAsUser: 10001
       containers:
         - name: webhook
-          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:f55dfa7ebf073ed42da9b9dc3ffe9e9a62682959
+          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:62860d4f03d7675bbb9908b7935a826dc801866f
           ports:
             - name: http
               containerPort: 8080
