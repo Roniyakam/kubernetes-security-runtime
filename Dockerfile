@@ -9,7 +9,10 @@ RUN pip install --no-cache-dir --target=/deps -r requirements.txt
 
 FROM python:3.12-slim
 
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin webhook
+# Fixed numeric UID: Kubernetes' runAsNonRoot check (gitops/webhook/deployment.yaml)
+# can't verify a non-numeric USER is non-root, so the pod spec pins runAsUser to
+# this same value.
+RUN useradd --system --no-create-home --shell /usr/sbin/nologin --uid 10001 webhook
 
 COPY --from=builder /deps /deps
 COPY webhook/app.py /app/app.py
