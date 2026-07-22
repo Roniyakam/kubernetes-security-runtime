@@ -1,206 +1,269 @@
-# kubernetes-security-runtime — cadrage S2 (webhook de réponse automatisée)
+# Cadrage S2 — réponse automatisée (webhook Python)
 
-## 0. Statut de ce document
+Ce document complète `docs/cadrage.md` (qui scope S1 à S5) maintenant
+que S1 est validé et clos. Il tranche les décisions spécifiques à S2
+avant toute implémentation, conformément à la règle CLAUDE.md de ce
+repo : cadrage à faire avant implémentation.
 
-Ce cadrage n'existait pas avant cette session — il n'y a aucune trace
-dans `git log --all` d'un `docs/cadrage-s2-webhook-response.md`
-antérieur. Il est reconstruit a posteriori, en session, à partir de la
-consigne de mission qui référençait déjà "13 décisions" par numéro
-sans que le document sous-jacent existe. Neuf décisions (2, 4, 6, 7, 8,
-10, 11, 12, 13) sont reconstruites quasi mot pour mot depuis cette
-consigne — marquées **reconstruite**. Quatre (1, 3, 5, 9) n'étaient
-référencées que par leur numéro, jamais définies — marquées
-**proposée, à confirmer** : ce sont mes propositions, pas des décisions
-déjà prises par l'utilisateur. Aucune ligne de code S2 n'est écrite
-avant validation de ce document.
+**Statut : validé par le porteur du projet.** Les 13 décisions
+ci-dessous ont été discutées et approuvées par le porteur du projet
+avant que l'implémentation ne soit autorisée. Note d'honnêteté sur
+la trace documentaire : ce document a été formalisé et committé dans
+ce repo dans le même mouvement que l'implémentation initiale de S2,
+pas dans un commit distinct antérieur, l'historique git ne fait donc
+pas apparaître de délai entre validation et code. Pour les projets
+suivants du portfolio, le cadrage sera committé séparément et avant
+toute implémentation, pour que cette vérification soit possible
+directement depuis l'historique git plutôt que de dépendre d'un
+contexte externe.
 
-## 1. Objectif et portée de S2
+---
 
-S1 (clos, validé) : Falco détecte et journalise, aucune réponse
-automatisée. S2 active une réponse automatisée limitée à
-**l'isolation réseau**, déclenchée par les alertes Falco relayées par
-Falcosidekick vers `webhook/app.py` (jusqu'ici un stub, voir
-`docs/cadrage.md` section 2).
+## Décisions à trancher avant tout code
 
-## 2. Les 13 décisions
+### 1. Isolation, pas destruction
 
-### Décision 1 — Nature de la réponse automatisée : isolation réseau, jamais suppression de pod
-**Statut : proposée, à confirmer.**
+**Décision validée** : le webhook applique une NetworkPolicy
+deny-all scopée au pod concerné (via un label unique posé par le
+webhook lui-même) et ajoute un label `quarantine=true`. Il ne
+supprime jamais le pod.
 
-Le webhook isole (label + `NetworkPolicy` deny-all ingress/egress) le
-pod visé, il ne le supprime ni ne le tue jamais. Raison proposée :
-préserver l'état du pod pour investigation (logs, `kubectl exec`
-encore possible tant que le process incriminé ne relance pas de
-connexion réseau, disque en l'état) et limiter le rayon d'impact d'un
-faux positif — un pod isolé à tort reste réparable (`/release`), un
-pod supprimé à tort ne l'est pas. Conséquence directe : voir décision
-12 (le pod isolé peut quand même être recyclé par son contrôleur,
-indépendamment de l'action du webhook).
+**Justification** : en réponse à incident réelle, détruire
+immédiatement la preuve empêche toute investigation forensique
+ultérieure. Isoler puis laisser un humain décider de la suite est la
+pratique IR standard, pas une automatisation totale aveugle.
 
-### Décision 2 — RBAC : Role par défaut, ClusterRole seulement si strictement nécessaire et strictement scopé
-**Statut : reconstruite** (le nom "décision 2" apparaît explicitement
-dans la consigne au sujet de Role vs ClusterRole).
+**Alternative rejetée** : `kubectl delete pod` immédiat, rejetée car
+destructive et irréversible, incompatible avec une démarche
+d'investigation sérieuse.
 
-Principe hérité de S1 (`docs/threat-model.md`, "Décision de sécurité :
-pas de ClusterRole" pour Falco) : jamais de RBAC cluster-wide par
-défaut. Pour le webhook spécifiquement, le namespace cible d'une
-isolation n'est pas connu à l'avance (n'importe quel namespace non
-protégé) — si un `ClusterRole` s'avère réellement nécessaire pour
-`get`/`patch` des pods et `create`/`delete`/`patch` des
-`networkpolicies` cross-namespace, c'est une exception documentée
-explicitement ici (voir Tâche 2 du prompt de mission), pas une
-contradiction silencieuse du principe "Role par défaut". Verbes
-autorisés dans ce cas : uniquement `get`, `list`, `patch` sur `pods`
-et `get`, `list`, `create`, `delete`, `patch` sur
-`networkpolicies.networking.k8s.io` — aucun wildcard, aucun autre verbe
-ou ressource.
+### 2. RBAC du webhook, moindre privilège strict
 
-### Décision 3 — Authentification : jeton partagé, header `Authorization`, source Vault
-**Statut : proposée, à confirmer** (le mécanisme est décrit dans la
-consigne — "shared token (env var populated from Vault at deploy time,
-same pattern as postgres_ha)" — mais jamais explicitement numéroté ;
-proposé ici comme décision 3 car c'est la première décision
-structurante rencontrée dans le flux `/webhook`).
+ServiceAccount dédié, `Role` (jamais `ClusterRole`) scopé au
+namespace concerné uniquement. Droits limités à :
+- `create`/`patch` sur `networkpolicies`
+- `patch` sur `pods` (labels uniquement)
 
-Un jeton partagé (bearer token) est vérifié sur `Authorization` pour
-`/webhook` et `/release`. Le jeton est généré et stocké dans Vault
-(`secret/kubernetes-security-runtime/webhook-token`), injecté au pod
-via un `Secret` Kubernetes peuplé par le même mécanisme que
-`postgres_ha` dans `devops-saas-platform`
-(`ansible/playbooks/deploy-vault-secrets.yml`) — jamais de valeur en
-clair committée dans ce repo (règle non négociable n°4 du
-`CLAUDE.md`).
+Jamais d'`exec`, jamais de `delete`, jamais de wildcard `*` sur `*`.
 
-### Décision 4 — Circuit breaker : fenêtre glissante de 5 minutes, seuil 3 isolations réelles
-**Statut : reconstruite.**
+### 3. Authentifier l'appel Falcosidekick vers le webhook
 
-Le webhook maintient en mémoire (processus du pod webhook, non
-persisté) le nombre d'isolations *réelles* (hors dry-run, hors dédup)
-des 5 dernières minutes. À la 4ᵉ dans la fenêtre : bascule en
-alert-only (aucune action Kubernetes) pour la requête courante et
-toutes les suivantes tant que la fenêtre ne s'est pas vidée sous le
-seuil, log `action="circuit_breaker_tripped"`, retour 200. Limitation
-assumée et documentée dans `docs/known-issues.md` (Tâche 8) : ce
-compteur est en mémoire, il est perdu à tout redémarrage du pod
-webhook — pas un état à considérer fiable pour de l'audit long terme,
-seulement un garde-fou anti-emballement en runtime.
+Un secret partagé (header HMAC ou token), stocké dans Vault selon le
+même mécanisme que le reste du projet, vérifié par le webhook avant
+toute action.
 
-### Décision 5 — Mapping MITRE : réutilisation de la table `threat-model.md`, pas de duplication
-**Statut : proposée, à confirmer** (la consigne renvoie à "la mapping
-table dans `docs/cadrage.md` section 7", qui n'existe pas — cette
-table existe réellement dans `docs/threat-model.md`, section "6 rules —
-MITRE ATT&CK mapping").
+Sans ça, n'importe quel pod sur le réseau du cluster peut forger un
+faux payload d'alerte critique et déclencher une mise en quarantaine
+arbitraire : un déni de service via le système censé protéger.
 
-Le champ `mitre_technique` du log d'incident (décision 6) est dérivé
-du nom de règle Falco (`rule` dans le payload Falcosidekick) via la
-table déjà présente dans `docs/threat-model.md` — encodée en dur dans
-`webhook/app.py` sous forme d'un dict `{nom_regle: technique_mitre}`
-reprenant exactement les 6 lignes de cette table, plutôt que dupliquée
-ou redéfinie. Toute alerte dont la règle n'y figure pas (règle par
-défaut Falco, hors des 6 custom — voir `docs/known-issues.md` "Falco's
-default ruleset is not pinned by this repo") reçoit
-`mitre_technique="unmapped"` plutôt que de faire échouer le traitement.
+**Limitation documentée** : le secret est statique pour S2, pas de
+rotation automatique. Acceptable pour ce périmètre, chemin
+d'amélioration identifié : token Vault dynamique à courte durée de
+vie, généré par requête plutôt qu'un secret fixe.
 
-### Décision 6 — Format des logs d'incident structurés
-**Statut : reconstruite.**
+### 4. Garde-fou anti-tempête (circuit breaker)
 
-JSON sur stdout, avec un marqueur permettant au Promtail/Loki côté
-`devops-saas-platform` de router ces lignes vers un label
-`job="webhook-incidents"` distinct du `job` Falcosidekick existant —
-même mécanisme d'ingestion que S1 (voir `docs/known-issues.md`,
-section Falcosidekick/Loki), pas un nouveau pipeline. Champs communs à
-toute action : `timestamp`, `falco_rule`, `mitre_technique`,
-`namespace`, `pod_name`, `action`, `result`, `latency_ms` (ce dernier
-`null` quand non pertinent, ex. `refused_protected_namespace`).
-Valeurs possibles de `action` : `dry_run_would_isolate`, `isolated`,
-`refused_protected_namespace`, `deduplicated`,
-`circuit_breaker_tripped`, `released`.
+**Seuil validé** : pas plus de 3 isolations automatiques sur une
+fenêtre glissante de 5 minutes. Au-delà, le webhook bascule en mode
+alerte seule (log uniquement, plus aucune action) et notifie.
 
-### Décision 7 — Déduplication via le label `security.internal/quarantine-target`
-**Statut : reconstruite.**
+**Justification** : un faux positif en boucle peut mettre en
+quarantaine toute la production. Un système de réponse automatique
+mal calibré est pire qu'aucun système.
 
-Si le pod visé porte déjà le label
-`security.internal/quarantine-target`, le webhook considère qu'une
-isolation est déjà en cours ou faite pour ce pod : log
-`action="deduplicated"`, ne compte pas dans la fenêtre du circuit
-breaker (décision 4), retour 200, aucune action Kubernetes.
+### 5. Comportement en cas d'indisponibilité du webhook
 
-### Décision 8 — Endpoint `/release`, déclenché par un analyste
-**Statut : reconstruite.**
+Déjà tranché dans le cadrage initial (risque documenté) : fail-open.
+Si le webhook est injoignable, Falco continue de logger dans Loki
+normalement, sans blocage ni perte d'alerte.
 
-Même authentification que `/webhook` (décision 3). Entrée : `namespace`
-+ `pod_name` en JSON. Actions : suppression de la `NetworkPolicy`
-associée au label de quarantaine de ce pod, retrait des labels
-`quarantine=true` et `security.internal/quarantine-target` du pod, log
-`action="released"`, retour 200. Pas d'authentification différenciée
-(pas de RBAC humain distinct dans ce projet portfolio) — le même jeton
-partagé sert aux deux usages, trade-off assumé et à documenter dans
-`docs/known-issues.md`.
+### 6. Enregistrement structuré de l'incident
 
-### Décision 9 — Portée de la réponse : seules les alertes `priority=CRITICAL` déclenchent une tentative d'isolation
-**Statut : proposée, à confirmer.**
+Chaque action de quarantaine génère un enregistrement structuré
+(JSON), envoyé vers Loki sur un flux distinct labellisé
+`job="webhook-incidents"` (jamais mélangé avec les logs
+applicatifs). Contenu minimal : horodatage, règle Falco déclenchante,
+technique MITRE ATT&CK associée, pod ciblé, namespace, action prise,
+résultat (succès/échec).
 
-La consigne de mission ne précise à aucun moment un filtre de sévérité
-sur `/webhook` — sans lui, n'importe quelle alerte Falco relayée par
-Falcosidekick (y compris `informational`/`notice`) déclencherait une
-tentative d'isolation. Proposition, cohérente avec le découpage déjà
-acté dans `docs/threat-model.md` (4 règles `CRITICAL`, 2 règles
-`ERROR`/"High") : seules les alertes de priorité Falco `critical`
-déclenchent le chemin d'isolation (dry-run ou réel) ; toute autre
-priorité (`error` inclus) reste journalisée sans action, avec un
-`action="below_response_threshold"` distinct pour rester traçable et
-ne pas être confondue avec les autres cas. Réévaluation possible plus
-tard si les règles `ERROR` (T1068 sudo, T1610 binaire écriture) doivent
-elles aussi déclencher une réponse — hors périmètre S2 tel que cadré
-ici.
+**Justification** : une action automatisée sans trace structurée et
+interrogeable n'est pas auditable. C'est la différence entre un
+script qui réagit et un système de réponse à incident qui laisse une
+preuve exploitable, exigence de base de tout outil SOAR sérieux
+(TheHive, Shuffle, Tines suivent tous ce principe).
 
-### Décision 10 — Métriques Prometheus : 3 compteurs
-**Statut : reconstruite.**
+**Rétention** : réutilise la politique déjà configurée sur Loki
+(15 jours, `devops-saas-platform`), pas de nouvelle politique à
+définir.
 
-`isolations_total`, `circuit_breaker_trips_total`,
-`auth_failures_total`, tous de type `Counter` (`prometheus_client`),
-exposés sur `/metrics`.
+### 7. Déduplication des événements
 
-### Décision 11 — Namespaces protégés : jamais d'isolation
-**Statut : reconstruite.**
+Falco peut émettre plusieurs événements pour un seul incident réel
+(plusieurs syscalls correspondant à la même règle en quelques
+secondes). Le webhook vérifie si le pod ciblé porte déjà le label
+`quarantine=true` avant d'agir : si oui, l'événement est journalisé
+mais ne déclenche ni nouvelle action ni nouveau compteur pour le
+circuit breaker.
 
-Liste fixe : `argocd`, `vault`, `kube-system`, `falco`. Si le namespace
-cible d'une alerte est dans cette liste, aucune action d'isolation
-(dry-run ou réelle) : log `action="refused_protected_namespace"`,
-`severity` du log forcée à `critical` (une alerte critique visant un
-de ces namespaces est en soi un signal fort, même sans réponse
-automatisée), retour 200.
+**Justification** : sans déduplication, un seul incident réel peut
+artificiellement déclencher le circuit breaker (5 événements
+dupliqués en 10 secondes ressemblent à 5 incidents distincts), ce qui
+fausserait le comportement décrit en section 4.
 
-### Décision 12 — L'isolation n'empêche pas un contrôleur de recycler le pod ; comportement observé à documenter
-**Statut : reconstruite** (référencée explicitement dans la séquence
-de validation de la consigne).
+### 8. Mécanisme de sortie de quarantaine
 
-Le webhook ne touche jamais au contrôleur (Deployment/ReplicaSet/etc.)
-du pod isolé — seulement labels + `NetworkPolicy` sur le pod lui-même
-(décision 1). Un pod nu (`kubectl run`) reste isolé tel quel ; un pod
-géré par un Deployment peut être recyclé indépendamment de l'action du
-webhook (liveness probe qui échoue une fois le réseau coupé, etc.). Le
-comportement réel observé sur les deux cas (validation étape 3) est à
-documenter dans `docs/known-issues.md`, pas supposé à l'avance.
+Une action automatisée doit avoir un chemin de retour arrière
+documenté. Le webhook expose un second endpoint (`POST /release`) qui
+retire le label `quarantine=true` et supprime la NetworkPolicy
+associée, après la même authentification que la mise en quarantaine.
+La levée de quarantaine reste une décision humaine : le webhook
+exécute la commande, il ne la déclenche jamais lui-même.
 
-### Décision 13 — Dry-run par défaut
-**Statut : reconstruite.**
+**Justification** : un système qui isole sans offrir de moyen de
+désisoler transforme un faux positif en incident opérationnel
+permanent.
 
-`DRY_RUN=true` par défaut (env var du Deployment, Tâche 2). En
-dry-run : log `action="dry_run_would_isolate"` avec le détail complet
-de ce qui aurait été fait (namespace, pod, règle, technique MITRE),
-**aucun** appel à l'API Kubernetes, retour 200. Le passage en mode réel
-se fait exclusivement par GitOps (`DRY_RUN: "false"` commité et poussé
-sur `main`), jamais par `kubectl edit`/`kubectl set env` — cohérent
-avec la règle non négociable n°1 du `CLAUDE.md` (GitOps pur).
+### 9. Tests unitaires du webhook
 
-## 3. Points laissés hors de ce cadrage (à traiter si besoin, pas dans S2 tel que défini ici)
+La logique critique (vérification d'authentification, comptage du
+circuit breaker, déduplication) est couverte par des tests unitaires
+(pytest), indépendants d'un cluster réel :
+- rejet d'une requête sans le bon secret
+- comptage correct du circuit breaker sur une fenêtre glissante
+- pas de double action sur un pod déjà en quarantaine
 
-- Pas de RBAC humain différencié pour `/release` (voir décision 8).
-- Pas de réponse automatisée au-delà de l'isolation réseau (pas de
-  revocation de token, pas de kill de process) — cohérent avec
-  `docs/threat-model.md` qui ne mentionne ces options que comme
-  exemples génériques, jamais comme périmètre S2 engagé.
-- Pas de dédup basée sur autre chose que le label
-  `security.internal/quarantine-target` (ex. pas de dédup par IP
-  source, par règle, etc.).
+Ajouté au CI : `pytest webhook/tests/`, en plus de `ruff`.
+
+### 10. Observabilité du webhook lui-même
+
+Le webhook expose un endpoint `/metrics` (Prometheus) avec au
+minimum : `isolations_total`, `circuit_breaker_trips_total`,
+`auth_failures_total`. Ajouté comme cible de scrape supplémentaire
+dans `devops-saas-platform` (`prometheus.yml.j2`), visible dans le
+dashboard Grafana `platform-overview` existant.
+
+**Justification** : la couche de réponse automatisée ne doit pas être
+un angle mort de l'observabilité déjà construite. Un expert qui
+demande "comment tu sais si ton SOAR fonctionne bien dans le temps"
+doit trouver une réponse mesurable, pas une affirmation.
+
+### 11. Namespaces protégés, jamais isolés automatiquement
+
+`argocd`, `vault`, `kube-system` et `falco` lui-même sont sur une
+liste explicite de namespaces protégés. Si une règle critique se
+déclenche sur un pod dans l'un de ces namespaces, le webhook refuse
+l'isolation, journalise une alerte de sévérité maximale ("action
+refusée, namespace protégé") et bascule immédiatement en notification
+humaine.
+
+**Justification** : c'est le parallèle direct de l'incident 001
+(ArgoCD a supprimé Vault par un auto-sync mal scopé). Un webhook qui
+isole ArgoCD ou Vault sur un faux positif transforme une alerte en
+panne totale de la plateforme. La leçon est déjà écrite dans ce
+portfolio, ne pas l'appliquer ici serait la répéter sciemment.
+
+### 12. Interaction avec le contrôleur du pod
+
+Isoler le réseau d'un pod fait souvent échouer ses probes de
+liveness/readiness. Kubernetes, ignorant l'isolement volontaire, peut
+alors redémarrer le pod via son contrôleur (Deployment, ReplicaSet),
+détruisant la fenêtre d'investigation que la décision 1 cherchait
+justement à préserver.
+
+**Décision pour S2** : ce comportement est documenté comme limitation
+connue, pas automatiquement mitigé (scaler à zéro le déploiement
+parent serait plus invasif que l'action initiale et risquerait
+d'affecter d'autres pods sains du même déploiement). Mitigation
+manuelle documentée pour l'analyste : retirer temporairement les
+probes ou scaler le déploiement avant une investigation prolongée. Le
+comportement réel (le pod est-il effectivement redémarré ou
+survit-il à l'isolement) doit être observé et documenté pendant la
+validation, pas supposé.
+
+### 13. Activation graduée (dry-run avant action réelle)
+
+Le webhook démarre avec `DRY_RUN=true` par défaut : il reçoit les
+événements, applique toute la logique (auth, déduplication, circuit
+breaker), journalise ce qu'il aurait fait, mais n'exécute aucune
+action réelle sur le cluster. Le passage en `DRY_RUN=false` est un
+changement de configuration explicite, décidé après une période
+d'observation sans faux positif documentée.
+
+**Justification** : cohérence avec le choix déjà fait en S1 (règles
+Falco en mode audit avant toute conséquence). Un système de réponse
+qui passe direct en action réelle dès son premier déploiement
+contredit la discipline progressive posée dès le départ du projet.
+
+---
+
+## Note de maturité SOAR
+
+Ce projet automatise une seule action réversible et scopée
+(isolation réseau d'un pod, jamais suppression, jamais action sur
+plusieurs pods à la fois). C'est un choix délibéré de maturité : les
+frameworks SOAR d'entreprise (Tines, Torq, Shuffle) recommandent de
+n'automatiser entièrement que des actions à faible risque et
+réversibles, en gardant les actions plus destructives derrière une
+validation humaine. Une automatisation totale non graduée dès le
+premier projet serait un signal d'inexpérience, pas de compétence.
+
+**Point non retenu pour S2, documenté pour référence future** : un
+Custom Resource Definition (`SecurityIncident`) avec un contrôleur
+dédié serait le pattern Kubernetes-natif le plus abouti pour tracer
+ces incidents, au lieu d'un flux Loki structuré. Écarté pour S2 car ça
+ajoute une complexité d'opérateur Kubernetes disproportionnée par
+rapport à la valeur ajoutée à ce stade. Candidat naturel pour une
+itération future si le projet évolue vers plusieurs types de réponse
+automatisée.
+
+**Lien réglementaire** : cette capacité de détection et réponse
+documentée, avec traçabilité et procédure de retour arrière, répond
+directement à l'esprit des obligations NIS2 de détection et
+notification d'incident, un argument mobilisable aussi bien côté SOC
+que côté GRC en entretien.
+
+---
+
+## Validation attendue en fin de S2
+
+- [ ] Scénario simulé : événement critique déclenché, isolation
+      appliquée et mesurée en moins de 10 secondes, chiffré et
+      documenté (pas d'affirmation sans mesure)
+- [ ] Scénario faux positif : un 4e déclenchement en moins de 5
+      minutes ne déclenche pas de 4e isolation, bascule vérifiée en
+      mode alerte seule
+- [ ] RBAC audité :
+      `kubectl auth can-i --list --as=system:serviceaccount:falco:webhook`
+      confirme le périmètre exact, rien de plus
+- [ ] Authentification testée : une requête sans le secret attendu
+      vers le webhook est rejetée (401/403), pas silencieusement
+      acceptée
+- [ ] Un incident structuré est visible dans Loki
+      (`job="webhook-incidents"`) après un scénario simulé, avec tous
+      les champs attendus (règle, technique MITRE, résultat)
+- [ ] Déduplication vérifiée : 3 événements dupliqués en 5 secondes
+      sur le même pod ne comptent que pour 1 dans le circuit breaker
+- [ ] `POST /release` testé : lève la quarantaine, supprime la
+      NetworkPolicy, vérifié par un `kubectl get pod` sans label
+      résiduel
+- [ ] `pytest webhook/tests/` : 100% des tests passent, exécuté en
+      CI, pas seulement en local
+- [ ] `curl http://webhook:8080/metrics` : les 3 compteurs sont
+      présents et incrémentent après un scénario simulé
+- [ ] Namespaces protégés testés : un événement critique simulé dans
+      `argocd` ou `vault` ne déclenche aucune isolation, seulement une
+      alerte "action refusée, namespace protégé"
+- [ ] Comportement de redémarrage observé et documenté : le pod isolé
+      est-il effectivement redémarré par son contrôleur pendant le
+      test ? Résultat réel noté dans `docs/known-issues.md`, pas
+      supposé à l'avance
+- [ ] Mode dry-run vérifié : avec `DRY_RUN=true`, un événement
+      critique simulé produit un log "aurait isolé X" sans
+      NetworkPolicy réellement créée
+
+---
+
+*Points 1 et 4 impliquaient le choix de comportement le plus sensible
+de ce document, pas un détail d'implémentation. Validés explicitement
+par le porteur du projet avant le lancement de l'implémentation S2,
+au même titre que l'ensemble des 13 décisions ci-dessus.*
