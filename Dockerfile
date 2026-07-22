@@ -20,9 +20,9 @@ ENV PYTHONPATH=/deps \
 WORKDIR /app
 USER webhook
 
-EXPOSE 8080
+EXPOSE 8080 9090
 
-# python -m uvicorn, not the /deps/bin/uvicorn console script: pip --target
-# bakes an absolute shebang pointing at the builder stage's interpreter,
-# which is fragile to rely on even though both stages share a base image.
-CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
+# python app.py (runs main(), not `python -m uvicorn app:app`): main() also
+# starts the dedicated metrics-only server on 9090 (see app.py's module
+# docstring) before handing off to uvicorn for the main app on 8080.
+CMD ["python", "app.py"]

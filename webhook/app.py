@@ -11,6 +11,14 @@ Structured incident logs are written to stdout as JSON with a
 route them to job="webhook-incidents" -- the same stdout-scrape mechanism
 Falcosidekick's own Loki output relies on in S1, not a new transport (see
 docs/known-issues.md).
+
+/metrics is served twice, deliberately: once on the main FastAPI app
+(port 8080, ClusterIP-only, alongside /webhook and /release) and once via
+prometheus_client's own standalone server (port 9090, main() below). Only
+the second is NodePort-exposed for the external Prometheus on
+vm-monitoring to scrape -- /webhook and /release never need to leave the
+cluster network, so only a metrics-only port does. See
+docs/known-issues.md.
 """
 
 import json
@@ -21,10 +29,11 @@ import time
 from collections import deque
 from datetime import UTC, datetime
 
+import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest, start_http_server
 from starlette.responses import Response
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
@@ -253,3 +262,16 @@ async def release(request: Request, authorization: str | None = Header(default=N
         latency_ms=None,
     )
     return {"status": "released"}
+
+
+def main() -> None:
+    # Only runs when this file is executed as the container's entrypoint
+    # (see Dockerfile) -- never on `import app`, so pytest never binds a
+    # real port or spawns the metrics server's background thread.
+    metrics_port = int(os.environ.get("METRICS_PORT", "9090"))
+    start_http_server(metrics_port)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
+
+
+if __name__ == "__main__":
+    main()

@@ -137,6 +137,29 @@ directly) can do both. Acceptable for a single-operator portfolio
 cluster; would need a second, narrower-scoped token before this
 pattern is reused where multiple people/services hold the token.
 
+## S2 — webhook `/metrics` is served on two ports, only one NodePort-exposed
+
+`vm-monitoring`'s Prometheus (Docker Compose stack, outside the K3s
+cluster — see the Loki reachability entry above) has no route to the
+K3s pod network (`10.42.0.0/24`) or `*.svc.cluster.local` DNS; every
+other scrape target in `devops-saas-platform`'s
+`prometheus.yml.j2` is node-level (`node_exporter`/`patroni` run
+directly on VMs), not a K8s `ClusterIP` Service — there was no
+existing pattern to copy for this. Resolved by giving the webhook a
+second, dedicated metrics-only port: `webhook/app.py`'s `main()` (the
+container's actual entrypoint, see `Dockerfile`) starts
+`prometheus_client`'s own standalone HTTP server on `:9090` in
+addition to the FastAPI app's own `/metrics` route on `:8080`. Only
+`:9090` is `NodePort`-exposed (`gitops/webhook/service.yaml`,
+`webhook-metrics` Service, `nodePort: 30090`) — it can only ever serve
+`/metrics`, nothing else, so exposing it outside the cluster doesn't
+widen the isolation-endpoint attack surface. `:8080` (`/webhook`,
+`/release`, `/healthz`, and its own `/metrics`) stays on the
+`ClusterIP`-only `falco-webhook` Service, matching the validation
+sequence's `curl http://webhook:8080/metrics` step. `main()` only runs
+as the container entrypoint (`if __name__ == "__main__":`), never on
+`import app` — `webhook/tests/` never binds either port.
+
 ## S2 — pod-controller behavior under isolation: pending live validation
 
 Decision 12 (`docs/cadrage-s2-webhook-response.md`): the webhook never

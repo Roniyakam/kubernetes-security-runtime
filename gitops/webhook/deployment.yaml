@@ -20,9 +20,15 @@ spec:
         runAsNonRoot: true
       containers:
         - name: webhook
-          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:c84b02bb637d60391d5115f6e608c02033c00315
+          # PENDING_FIRST_BUILD: placeholder, updated to the real SHA once
+          # CI publishes the image for this commit (see docs/known-issues.md
+          # -- same one-time bootstrap dance as the previous image update).
+          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:PENDING_FIRST_BUILD
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
           env:
             # Decision 13 (docs/cadrage-s2-webhook-response.md): dry-run by
             # default. Flipped to "false" only via a committed GitOps change.
