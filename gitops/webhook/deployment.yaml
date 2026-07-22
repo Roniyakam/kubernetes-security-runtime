@@ -31,7 +31,7 @@ spec:
             # Decision 13 (docs/cadrage-s2-webhook-response.md): dry-run by
             # default. Flipped to "false" only via a committed GitOps change.
             - name: DRY_RUN
-              value: "false"
+              value: "true"
             - name: WEBHOOK_TOKEN
               valueFrom:
                 secretKeyRef:
