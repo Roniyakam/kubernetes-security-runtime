@@ -160,18 +160,63 @@ sequence's `curl http://webhook:8080/metrics` step. `main()` only runs
 as the container entrypoint (`if __name__ == "__main__":`), never on
 `import app` — `webhook/tests/` never binds either port.
 
-## S2 — pod-controller behavior under isolation: pending live validation
+## S2 — pod-controller behavior under isolation: observed result (live validation, 2026-07-22)
 
 Decision 12 (`docs/cadrage-s2-webhook-response.md`): the webhook never
 deletes the isolated pod, only labels it and creates a deny-all
-`NetworkPolicy` — but nothing stops that pod's own controller
-(Deployment/ReplicaSet) from replacing it independently (e.g. a
-liveness/readiness probe failing once network egress is cut). Whether
-this actually happens, and on what timescale, is only known once the
-validation sequence runs against both a bare `kubectl run` pod and a
-Deployment-backed one — **not yet observed, this entry is a
-placeholder to be filled in with the real result**, not an assumption
-either way.
+`NetworkPolicy` (Ingress + Egress). The open question was whether the
+pod's own controller (Deployment/ReplicaSet) would replace it
+independently once its liveness/readiness probe started failing under
+isolation.
+
+**Live validation performed** against `DRY_RUN=false` (temporarily
+flipped via GitOps, reverted after): a disposable `nginx:1.27`
+Deployment (`test-real-controlled`, namespace `default`, 1 replica,
+liveness probe `httpGet :80/`, `periodSeconds=5`, `failureThreshold=1`)
+was created, a real shell spawned inside it via `kubectl exec ... sh`
+at `2026-07-22T12:36:28.046Z`. The webhook's structured incident log
+confirmed real isolation (`action="isolated"`) and the deny-all
+`NetworkPolicy` (`quarantine-test-real-controlled-78bf7747f6-8lpd4`)
+existed by `2026-07-22T12:36:28.5Z` (sub-second, consistent with the
+bare-pod case below).
+
+**Observed result: the pod was never killed or replaced.** Polled
+every 5s for 4.5 minutes immediately after isolation, then confirmed
+again via `kubectl describe pod` ~20 minutes after creation:
+`Restart Count: 0` throughout, same pod name/UID the entire time, no
+`Unhealthy`/`Killing`/`BackOff` event ever appeared in
+`kubectl get events -n default` for this pod — only the normal
+`Scheduled`/`Pulled`/`Created`/`Started` events from initial creation.
+
+**Root cause, verified directly, not assumed**: the `NetworkPolicy`
+*is* enforced for pod-to-pod traffic — a separate test pod on the same
+node, issuing `curl` directly at the isolated pod's IP, got
+`Connection refused` in ~1ms. But the isolated nginx pod's own access
+log showed `kube-probe/1.29` succeeding with `200` responses every 5
+seconds, continuously, for the entire isolation window (12+ minutes
+observed) — the kubelet's own liveness/readiness probe traffic was
+never blocked. This cluster runs vanilla k3s (`v1.29.4+k3s1`) with its
+embedded flannel + kube-router-based `NetworkPolicy` enforcement (no
+separate CNI controller pod visible in `kube-system` — enforcement is
+built into the k3s agent/server binary). On this stack, kubelet health
+probes are same-node, locally-routed traffic that bypasses the
+overlay-network path the netpol rules actually filter, while
+cross-node/cross-pod traffic over the overlay is correctly blocked.
+
+**Practical consequence for this project**: decision 12's assumed
+failure mode (isolation triggers a probe failure → controller restarts
+the pod → investigation window destroyed) **does not manifest on this
+cluster**, for any Deployment-backed workload, because kubelet probes
+are always node-local by construction. The manual mitigation described
+in decision 12 (remove probes / scale down before a prolonged
+investigation) is not required in practice here — but this is a
+property of k3s's specific `NetworkPolicy` enforcement implementation,
+not a general Kubernetes guarantee. A cluster running Calico, Cilium,
+or another CNI with a different (and more complete) `NetworkPolicy`
+enforcement path could behave differently, i.e. actually block kubelet
+probe traffic and hit the original decision-12 concern. This finding
+is scoped to this cluster's actual CNI, not a universal claim about
+Kubernetes `NetworkPolicy` behavior.
 
 ## S2 — image tag bootstrap in `gitops/webhook/deployment.yaml` (resolved)
 
