@@ -192,19 +192,31 @@ comportement réel (le pod est-il effectivement redémarré ou
 survit-il à l'isolement) doit être observé et documenté pendant la
 validation, pas supposé.
 
-### 13. Activation graduée (dry-run avant action réelle)
+### 13. Activation graduée (dry-run comme état de repos permanent)
 
 Le webhook démarre avec `DRY_RUN=true` par défaut : il reçoit les
 événements, applique toute la logique (auth, déduplication, circuit
 breaker), journalise ce qu'il aurait fait, mais n'exécute aucune
-action réelle sur le cluster. Le passage en `DRY_RUN=false` est un
-changement de configuration explicite, décidé après une période
-d'observation sans faux positif documentée.
+action réelle sur le cluster.
 
-**Justification** : cohérence avec le choix déjà fait en S1 (règles
-Falco en mode audit avant toute conséquence). Un système de réponse
-qui passe direct en action réelle dès son premier déploiement
-contredit la discipline progressive posée dès le départ du projet.
+**Politique opérationnelle définitive (post-validation live du
+22/07/2026)** : `DRY_RUN=true` reste l'état de repos permanent de ce
+projet, pas une étape transitoire vers un mode "toujours actif". Le
+passage à `DRY_RUN=false` est réservé à des fenêtres délibérées et
+bornées dans le temps, pour un test de validation ou une
+démonstration supervisée, toujours via un commit GitOps qui prévoit
+le commit de retour à `true` dans la même session, jamais laissé
+actif sans supervision humaine directe.
+
+**Justification** : ce projet est opéré par une seule personne, sans
+équipe d'astreinte ni supervision continue du cluster. Laisser une
+action automatisée réelle tourner sans surveillance sur une
+infrastructure qui n'est pas monitorée 24/7 est un risque
+opérationnel net, pas une preuve de maturité. Un programme SOAR
+d'entreprise élargit progressivement l'autonomie d'un système à
+mesure qu'une équipe est réellement en capacité de le superviser ;
+cette condition n'étant jamais remplie en continu ici, l'état de
+repos reste prudent par construction, pas par défaut faute de mieux.
 
 ---
 
