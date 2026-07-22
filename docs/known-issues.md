@@ -187,3 +187,48 @@ one-time bootstrap ordering issue, not a recurring one: every commit
 after this one has its image built before (or in the same push as)
 any manifest change referencing it, so no future commit needs this
 two-step dance — a normal image tag bump is a single commit.
+
+## S2 — `celery`/`rabbitmq` have zero automated isolation coverage (security trade-off, not blast-radius)
+
+Live S2 validation (2026-07-22) found that `celery` and `rabbitmq`'s
+exec-based liveness/readiness probes invoke a shell every 5-15s, which
+trips rule 1 ("Shell Spawned in Container") continuously — the rule as
+currently written cannot distinguish a kubelet-issued probe exec from
+an attacker's interactive shell. The initial fix added both namespaces
+to the same protected-namespace list as `argocd`/`vault`/`kube-system`/
+`falco` (decision 11), which conflated two different things:
+
+- Decision 11's original four are a **blast-radius** exception:
+  isolating them would break the platform's own control plane, and
+  that stays true no matter how good the detection is. Permanent by
+  design.
+- `celery`/`rabbitmq` are a **security trade-off**: the webhook refuses
+  to isolate them purely because rule 1 can't tell probe noise from a
+  real shell yet. This is not a statement that compromise in these
+  namespaces is lower-risk — it means genuine shell-based compromise in
+  either namespace currently gets **zero automated isolation
+  coverage**, identical to a false positive from a health check.
+  Falco still logs the alert (S1 detection is unaffected), but S2's
+  automated response takes no action either way.
+
+`webhook/app.py` now tracks these as two separate sets
+(`CRITICAL_NAMESPACES`, `NOISY_PROBE_NAMESPACES`) with distinct
+`log_incident` actions (`refused_protected_namespace` vs
+`refused_noisy_probe_namespace`) so the two reasons stay
+distinguishable in the structured incident logs (decision 6) instead
+of collapsing into one indistinguishable category.
+
+**Not yet implemented** — the actual fix, to close this coverage gap
+without reintroducing the probe noise:
+
+- Tune rule 1 to exclude the exact probe command patterns from each
+  deployment's spec (the probe command is known and static per
+  Deployment), or
+- Use process lineage (parent process from a kubelet exec vs. an
+  interactive shell) to distinguish legitimate health checks from real
+  compromise at the Falco rule level, rather than at the webhook.
+
+Once either is in place and validated against both namespaces, remove
+`celery`/`rabbitmq` from `NOISY_PROBE_NAMESPACES` — this list is a
+temporary mitigation, not a permanent design choice like
+`CRITICAL_NAMESPACES`.

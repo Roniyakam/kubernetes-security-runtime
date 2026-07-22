@@ -68,6 +68,16 @@ def test_protected_namespace_is_refused(monkeypatch):
     assert resp.json()["status"] == "refused_protected_namespace"
 
 
+def test_noisy_probe_namespace_is_refused(monkeypatch):
+    client = _client(monkeypatch)
+    _forbid_k8s(monkeypatch)
+
+    resp = client.post("/webhook", json=_payload(namespace="celery"), headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "refused_noisy_probe_namespace"
+
+
 def test_below_response_threshold_alert_is_logged_only(monkeypatch):
     client = _client(monkeypatch)
     _forbid_k8s(monkeypatch)

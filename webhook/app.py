@@ -42,14 +42,22 @@ logger = logging.getLogger("webhook")
 WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() == "true"
 
-# Decision 11: never isolate in these namespaces, whatever the alert.
-# celery/rabbitmq added after live S2 validation (2026-07-22, see
-# docs/known-issues.md): their exec-based liveness/readiness probes
-# (a shell invoked every 5-15s) trip "Shell Spawned in Container"
-# continuously, and isolating either would break real message/task
-# processing in devops-saas-platform -- same blast-radius logic as the
-# original four, not a scope creep.
-PROTECTED_NAMESPACES = {"argocd", "vault", "kube-system", "falco", "celery", "rabbitmq"}
+# Decision 11: blast-radius critical infrastructure, isolating these would
+# break the platform itself, permanent by design.
+CRITICAL_NAMESPACES = {"argocd", "vault", "kube-system", "falco"}
+
+# Known false-positive source: exec-based liveness/readiness probes trigger
+# "Shell Spawned in Container" every 5-15s, indistinguishable from a real
+# shell by rule 1 as currently written. This is a SECURITY TRADE-OFF, not a
+# blast-radius exception: these namespaces lose real isolation coverage for
+# genuine shell-based compromise, not just for probe noise. Temporary
+# mitigation, not a permanent design choice. Better fix (not implemented
+# yet, tracked in known-issues.md): tune rule 1 to exclude the exact probe
+# command patterns from each deployment's spec, or use process lineage
+# (parent process from kubelet exec vs interactive shell) to distinguish
+# legitimate health checks from real compromise, then remove these
+# namespaces from this list once done.
+NOISY_PROBE_NAMESPACES = {"celery", "rabbitmq"}
 
 QUARANTINE_LABEL = "security.internal/quarantine-target"
 
@@ -148,8 +156,9 @@ async def webhook(request: Request, authorization: str | None = Header(default=N
         log_incident(**common, action="malformed_payload", result="rejected", latency_ms=None)
         raise HTTPException(status_code=400, detail="missing k8s.ns.name/k8s.pod.name in output_fields")
 
-    # Decision 11: protected namespaces are an absolute veto, checked first.
-    if namespace in PROTECTED_NAMESPACES:
+    # Decision 11: critical-infrastructure namespaces are an absolute veto,
+    # checked first.
+    if namespace in CRITICAL_NAMESPACES:
         log_incident(
             **common,
             action="refused_protected_namespace",
@@ -158,6 +167,19 @@ async def webhook(request: Request, authorization: str | None = Header(default=N
             latency_ms=None,
         )
         return {"status": "refused_protected_namespace"}
+
+    # Noisy-probe namespaces: same veto point, distinct log action so this
+    # stays distinguishable from decision 11's blast-radius exceptions (see
+    # docs/known-issues.md for the security trade-off this implies).
+    if namespace in NOISY_PROBE_NAMESPACES:
+        log_incident(
+            **common,
+            action="refused_noisy_probe_namespace",
+            result="refused",
+            severity="critical",
+            latency_ms=None,
+        )
+        return {"status": "refused_noisy_probe_namespace"}
 
     # Decision 9: only priority=Critical alerts reach the isolation path.
     if priority != "Critical":

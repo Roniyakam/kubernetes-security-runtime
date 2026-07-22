@@ -162,6 +162,18 @@ isole ArgoCD ou Vault sur un faux positif transforme une alerte en
 panne totale de la plateforme. La leçon est déjà écrite dans ce
 portfolio, ne pas l'appliquer ici serait la répéter sciemment.
 
+**Addendum (2026-07-22)** : `celery` et `rabbitmq` avaient été ajoutés
+à cette même liste après validation live S2, avec la même
+justification blast-radius. C'était une confusion — leur raison
+d'exclusion n'a rien à voir avec la criticité d'infrastructure : c'est
+un faux positif de la règle 1 sur leurs probes exec-based. `webhook/app.py`
+sépare maintenant `CRITICAL_NAMESPACES` (cette décision 11, inchangée)
+de `NOISY_PROBE_NAMESPACES` (`celery`, `rabbitmq`), avec des actions de
+log distinctes. Le compromis de sécurité que cette deuxième liste
+implique — zéro couverture d'isolation automatisée, y compris pour une
+vraie compromission par shell — est documenté explicitement dans
+`docs/known-issues.md`, pas résumé ici sous l'angle blast-radius.
+
 ### 12. Interaction avec le contrôleur du pod
 
 Isoler le réseau d'un pod fait souvent échouer ses probes de
