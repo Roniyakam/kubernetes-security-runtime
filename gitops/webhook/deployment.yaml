@@ -20,10 +20,7 @@ spec:
         runAsNonRoot: true
       containers:
         - name: webhook
-          # PENDING_FIRST_BUILD: placeholder, updated to the real SHA once
-          # CI publishes the image for this commit (see docs/known-issues.md
-          # -- same one-time bootstrap dance as the previous image update).
-          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:PENDING_FIRST_BUILD
+          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:f55dfa7ebf073ed42da9b9dc3ffe9e9a62682959
           ports:
             - name: http
               containerPort: 8080
