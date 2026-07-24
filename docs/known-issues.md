@@ -486,9 +486,18 @@ Service endpoints during a rolling update, Falcosidekick's requests
 round-robin between two processes each with their own empty-or-primed
 window, so each can independently allow one push. This is a narrow,
 self-resolving artifact of any single rollout (steady state afterwards
-is exactly as designed, confirmed above) and shares its root cause and
-its accepted trade-off with the already-documented in-memory circuit
-breaker -- not a new gap, not fixed separately.
+is exactly as designed, confirmed above).
+
+**Not the same failure mode as decision 4's limitation, despite the
+shared root cause**: decision 4's documented limitation ("webhook
+circuit breaker is in-memory, not persisted", above) is state loss on
+restart -- a single instance forgetting its past across time. This is
+state non-sharing across concurrent replicas during a rolling
+deploy -- two simultaneous instances unaware of each other. Same root
+cause (in-memory, not backed by a shared store), different failure
+mode. Both are accepted as-is for this portfolio's
+single-replica-by-default architecture; neither requires a fix now --
+not a new gap, not fixed separately.
 
 ## S2 — Loki incident visibility (decision 6): label guess was wrong, and the underlying transport doesn't exist (superseded, fixed 2026-07-24)
 
