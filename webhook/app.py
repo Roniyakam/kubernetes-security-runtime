@@ -39,7 +39,12 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest, start_http_server
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    generate_latest,
+    start_http_server,
+)
 from starlette.responses import Response
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)

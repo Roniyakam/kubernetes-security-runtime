@@ -1,9 +1,8 @@
 import json
 from unittest.mock import MagicMock
 
-from fastapi.testclient import TestClient
-
 import app as app_module
+from fastapi.testclient import TestClient
 
 AUTH_HEADERS = {"Authorization": "Bearer test-token"}
 
