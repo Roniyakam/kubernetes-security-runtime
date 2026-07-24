@@ -96,6 +96,27 @@ preuve exploitable, exigence de base de tout outil SOAR sérieux
 (15 jours, `devops-saas-platform`), pas de nouvelle politique à
 définir.
 
+**Addendum (2026-07-24, throttle des refus)** : décision 13 fait de
+`DRY_RUN=true` l'état de repos permanent de ce projet, et une
+observation live déjà documentée (`docs/known-issues.md`) montre que
+`vault`, `celery` et `rabbitmq` déclenchent la règle 1 en continu sur
+leurs probes exec (`refused_protected_namespace`,
+`refused_noisy_probe_namespace`), indépendamment de `DRY_RUN`. Depuis
+la fermeture du gap Loki ci-dessus, ces deux actions de refus
+atteignaient Loki à chaque occurrence, sans fin — un bruit attendu,
+faible en signal, qui aurait noyé indéfiniment tout signal réel sur
+ces mêmes namespaces. `webhook/app.py` limite maintenant le push Loki
+(uniquement) de ces deux actions à une occurrence par couple
+(namespace, action) par fenêtre glissante de 5 minutes, en réutilisant
+le motif de fenêtre glissante de la décision 4 (section précédente)
+mais avec une clé par paire au lieu d'un compteur global, et un seuil
+de 1 au lieu de 3. Les compteurs Prometheus
+(`refused_protected_namespace_total`,
+`refused_noisy_probe_namespace_total`, labellisés par namespace) et le
+log JSON stdout restent non limités dans tous les cas — seul ce qui
+atteint Loki change. Validé en direct : voir `docs/known-issues.md`,
+"Loki refusal-push throttle (decision 6 addendum)".
+
 ### 7. Déduplication des événements
 
 Falco peut émettre plusieurs événements pour un seul incident réel

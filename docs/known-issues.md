@@ -413,6 +413,58 @@ inside a Falco-monitored namespace needs this same check: does the
 call reuse a connection, or does it manufacture a new "unexpected
 outbound connection" event every time it fires.
 
+## S2 — Loki refusal-push throttle (decision 6 addendum): permanent resting-state noise from probe-driven refusals, 2026-07-24
+
+With GAP 2 fixed (previous two entries), every `log_incident()` call
+reaches Loki, including the two refusal actions
+(`refused_protected_namespace`, `refused_noisy_probe_namespace`).
+Decision 13 makes `DRY_RUN=true` the permanent resting state of this
+project, not a transitional phase, and the "systemic observation"
+entry above already documents that `vault`, `celery`, and `rabbitmq`
+trip rule 1 continuously on their own kubelet exec probes (every
+5-15s), independent of `DRY_RUN`. Left unthrottled, these two refusal
+actions alone would generate a permanent, unbounded stream of
+expected, low-signal Loki entries on these namespaces, forever, since
+the underlying probe traffic never stops -- burying any genuine signal
+that later shows up on those same namespaces under routine repetition
+of an already-known, already-documented trade-off.
+
+**Fix**: `webhook/app.py`'s `log_incident()` now accepts an optional
+`loki_throttle_key=(namespace, action)`, checked against
+`_loki_refusal_push_allowed()` before the Loki push (only) -- one push
+per (namespace, action) pair per 5-minute rolling window
+(`LOKI_REFUSAL_THROTTLE_WINDOW_SECONDS`), reusing decision 4's
+sliding-window pattern (`deque` of monotonic timestamps, pruned on
+each check) but keyed per-pair with a cap of 1 instead of a single
+global count capped at 3. Only the two refusal actions pass this key;
+`isolated`, `released`, and `circuit_breaker_tripped` are untouched --
+these are always real, low-volume, non-repeating events and stay fully
+logged and unthrottled, per the S2 objective.
+
+**What stays unthrottled, deliberately**: the stdout JSON log (every
+event, always -- local `kubectl logs` debugging must see everything)
+and two new Prometheus counters,
+`refused_protected_namespace_total{namespace}` and
+`refused_noisy_probe_namespace_total{namespace}`, incremented on every
+single refusal regardless of whether that refusal's Loki push was
+throttled. This is deliberate: Prometheus is the place for
+volume/rate visibility (a counter is exactly what "how often is this
+firing" needs), Loki is the place for the audit trail decision 6
+describes, and this fix only changes what reaches the latter. Covered
+by `test_loki_refusal_push_is_rate_limited_but_counter_still_increments`
+(`webhook/tests/test_app.py`): two refusals for the same
+namespace/action, one Loki push, counter incremented twice.
+
+**Live validation, 2026-07-24**: with the throttle active, `vault`'s
+repeated probe-driven refusals produced exactly one
+`{job="webhook-incidents"}` entry for
+`action="refused_protected_namespace", namespace="vault"` and then
+went quiet in Loki for the remainder of the 5-minute window, while
+`/metrics`' `refused_protected_namespace_total{namespace="vault"}`
+kept climbing in parallel with every probe cycle -- confirming the
+split works exactly as designed: complete quantitative visibility in
+Prometheus, signal-preserving (not signal-losing) visibility in Loki.
+
 ## S2 — Loki incident visibility (decision 6): label guess was wrong, and the underlying transport doesn't exist (superseded, fixed 2026-07-24)
 
 **Superseded**: this entry documents the original diagnosis of the
