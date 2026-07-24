@@ -284,21 +284,21 @@ que côté GRC en entretien.
       acceptée (validé 22/07/2026 : requête avec un `Bearer` invalide
       sur `/webhook` → 401 `{"detail":"unauthorized"}`,
       `auth_failures_total` incrémenté)
-- [ ] Un incident structuré est visible dans Loki
+- [x] Un incident structuré est visible dans Loki
       (`job="webhook-incidents"`) après un scénario simulé, avec tous
       les champs attendus (règle, technique MITRE, résultat).
-      **Testé le 22/07/2026, non concluant** : `job="webhook-incidents"`
-      ne retourne aucun résultat — Loki n'a même pas de label `job`
-      (`labels` API : `hostname`, `k8s_ns_name`, `k8s_pod_name`,
-      `priority`, `rule`, `service_name`, `source`, `tags`). Cause
-      racine identifiée : aucun agent de log-shipping (Promtail/Fluent
-      Bit/Vector) ne tourne dans ce cluster K3s — seul Falcosidekick
-      pousse vers Loki, en direct, pour ses propres événements Falco.
-      Le JSON structuré du webhook est bien écrit et correct (vérifié
-      via `kubectl logs`) mais n'atteint jamais Loki. Détail complet et
-      pistes de correction : `docs/known-issues.md`. Reste
-      délibérément décoché : la fonctionnalité n'est pas fermée, pas
-      juste mal étiquetée.
+      **Corrigé et validé le 24/07/2026** : `webhook/app.py` pousse
+      maintenant chaque `log_incident()` directement vers l'API push
+      de Loki (`/loki/api/v1/push`), le même pattern que Falcosidekick
+      utilise déjà pour ses propres événements Falco, puisqu'aucun
+      agent de log-shipping ne tourne dans ce cluster (cause racine
+      identifiée le 22/07/2026, voir `docs/known-issues.md`). Validé en
+      direct : `{job="webhook-incidents"} |= "loki-gap2-clean"` retourne
+      une entrée réelle, `action="isolated"`, avec `falco_rule`,
+      `mitre_technique`, `namespace`, `pod_name`, `result`,
+      `latency_ms` tous renseignés. Détail complet, y compris une
+      boucle de rétroaction découverte et corrigée pendant cette même
+      validation live : `docs/known-issues.md`.
 - [x] Déduplication vérifiée : 3 événements dupliqués en 5 secondes
       sur le même pod ne comptent que pour 1 dans le circuit breaker
       (validé 22/07/2026 : pod unique `dedup-test-1`, 3 déclenchements

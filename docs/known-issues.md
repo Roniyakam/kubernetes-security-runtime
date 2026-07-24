@@ -311,7 +311,114 @@ never reached the isolation code path or the circuit breaker counter,
 exactly as decision 7 specifies. Test pod and its `NetworkPolicy`
 deleted after validation.
 
-## S2 — Loki incident visibility (decision 6): label guess was wrong, and the underlying transport doesn't exist
+## S2 — Loki incident visibility (decision 6): fixed, direct push to Loki's HTTP API
+
+**Fixed 2026-07-24** (superseding the "label guess was wrong" entry
+below, kept for the diagnostic history): `webhook/app.py`'s
+`log_incident()` now pushes each structured incident directly to
+Loki's push API (`POST /loki/api/v1/push`), in addition to the
+existing stdout JSON, using `job="webhook-incidents"` as a single
+static label (decision 6) -- the JSON detail stays in the log line
+body, never promoted to per-field labels, to avoid a high-cardinality
+label explosion (a distinct series per `pod_name`/`namespace`/etc.).
+Same vm-monitoring Loki instance and hostport Falcosidekick already
+uses (`gitops/falcosidekick/values.yaml`'s `config.loki.hostport`,
+`gitops/webhook/deployment.yaml`'s `LOKI_PUSH_URL` env var) -- no new
+UFW rule, same reachability path already established for S1. Format
+verified directly against the running Loki 3.0.0
+(`/loki/api/v1/status/buildinfo`) before writing any code: a manual
+`curl -X POST .../loki/api/v1/push` with a
+`{"streams": [{"stream": {...}, "values": [[<ns>, <line>]]}]}` body
+returned `204`, and a follow-up `query_range` read it back.
+
+Fire-and-forget with a 2-second timeout: a Loki outage only logs a
+stdout warning, never blocks or fails the isolation/release action
+itself (fail-open, decision 5) -- covered by
+`test_loki_push_failure_does_not_fail_the_request`
+(`webhook/tests/test_app.py`).
+
+**Live validation, 2026-07-24**: disposable pod `loki-gap2-clean`
+(`nginx:1.27`, namespace `default`), real shell via `kubectl exec`,
+`DRY_RUN=false` temporarily via GitOps (reverted immediately after).
+`{job="webhook-incidents"} |= "loki-gap2-clean"` returned exactly one
+entry: `action="isolated"`, `result="isolated"`, `latency_ms=96.79`,
+`falco_rule`, `mitre_technique`, `namespace`, `pod_name` all populated
+-- every field decision 6 asks for, queryable in Loki for real, closing
+the gap this entry originally documented as open.
+
+**A real bug was found and fixed during this same live validation**,
+not just the expected happy path -- see the next entry
+("self-triggering feedback loop") for what it was and how it was
+caught.
+
+## S2 — Loki push created a self-triggering feedback loop on the webhook's own pod (found and fixed, 2026-07-24)
+
+The first implementation of the Loki push above (see previous entry)
+used `urllib.request.urlopen()`, which opens a brand-new TCP connection
+for every single push -- no connection reuse. Live-validated
+consequence: the webhook pod's own egress to Loki (an external IP, see
+"Real IP address committed" entry below) is itself traffic that Falco
+monitors from that pod's network namespace. `webhook` lives in the
+`falco` namespace (`CRITICAL_NAMESPACES`, decision 11), so every one of
+these self-triggered "Custom - Unexpected Outbound Connection" alerts
+was correctly refused (`action="refused_protected_namespace"`, never a
+real isolation) -- but refusing still calls `log_incident()`, which
+pushed to Loki again, opening another new connection, tripping another
+alert, refused again, pushed again... a self-sustaining loop entirely
+contained within the webhook's own request-handling path.
+
+**Observed live** (`DRY_RUN=false` validation window, before the fix):
+a sustained stream of `refused_protected_namespace` entries for
+`pod_name="webhook-<hash>"`, roughly 1/second sustained (some bursts
+tighter), webhook pod CPU at 112m of its 200m limit (vs. 4m at rest
+after the fix), confirmed via `kubectl top pod` and direct Loki queries
+returning over a thousand matching lines for a few minutes of window.
+Not a runaway explosion (bounded by request-handling throughput, and
+namespace=falco means never a real isolation or circuit-breaker
+increment either way) but a real, self-inflicted noise source and
+wasted egress against `vm-monitoring`, not something to ship.
+
+**Root cause, verified directly**: Falcosidekick's own Loki output
+does *not* show up as a repeating source of this same alert on its own
+pod (also in the protected `falco` namespace) because it reuses one
+persistent HTTP connection across pushes -- the TCP handshake, which is
+what the Falco rule actually detects as a "new" connection, happens
+once, not once per push.
+
+**Fix**: `webhook/app.py`'s `_push_incident_to_loki()` now uses one
+module-level `http.client.HTTPConnection`, created lazily and reused
+across pushes (`_loki_connection()`), only reconnecting after a failed
+request. This matches Falcosidekick's actual behavior instead of the
+initially-assumed equivalence between "same pattern" and "same
+library call" -- fire-and-forget with a short timeout was correct;
+opening a fresh connection per call was the actual bug. Covered by
+`test_loki_connection_is_reused_across_pushes`
+(`webhook/tests/test_app.py`): two pushes, one `HTTPConnection`
+constructed, `.request()` called twice on it.
+
+**Re-validated after the fix**: same live window, webhook pod CPU back
+to 4m, zero `pod_name="webhook-<hash>"` entries in a 35-second window
+post-rollout (only the pre-existing, already-documented noisy-probe
+events from `celery`/`rabbitmq`/`vault` remained) -- see the previous
+entry for the clean re-run of the actual gap-2 validation once this was
+fixed.
+
+**Practical lesson for this project**: "mirror Falcosidekick's pattern"
+was correct at the level of transport choice (direct HTTP push, no
+log-shipping agent) but the first implementation copied the *shape* of
+that pattern (fire-and-forget POST) without verifying the specific
+mechanic (connection reuse) that made it safe for a pod Falco itself
+monitors. Any future direct network call made *from* a pod running
+inside a Falco-monitored namespace needs this same check: does the
+call reuse a connection, or does it manufacture a new "unexpected
+outbound connection" event every time it fires.
+
+## S2 — Loki incident visibility (decision 6): label guess was wrong, and the underlying transport doesn't exist (superseded, fixed 2026-07-24)
+
+**Superseded**: this entry documents the original diagnosis of the
+gap; the fix and its live validation are recorded above under
+"Loki incident visibility (decision 6): fixed, direct push to Loki's
+HTTP API". Kept here for the diagnostic history.
 
 Decision 6 (`docs/cadrage-s2-webhook-response.md`) assumed the
 webhook's structured `log_incident()` JSON (stdout, `"log_type":
