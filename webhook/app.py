@@ -35,6 +35,20 @@ the second is NodePort-exposed for the external Prometheus on
 vm-monitoring to scrape -- /webhook and /release never need to leave the
 cluster network, so only a metrics-only port does. See
 docs/known-issues.md.
+
+Decision 6 addendum: with DRY_RUN=true as the permanent resting state
+(decision 13) and GAP 2's fix making every refusal reach Loki, vault's
+and celery/rabbitmq's probe-driven refusals (decision 11's protected
+namespaces, NOISY_PROBE_NAMESPACES) fire continuously and forever --
+expected, low-signal noise that would otherwise flood Loki and bury
+real signal on the same namespaces. Only the Loki push for these two
+refusal actions is rate-limited, one push per (namespace, action)
+combination per 5-minute rolling window, reusing decision 4's
+sliding-window pattern keyed per-pair instead of globally
+(_loki_refusal_push_allowed()). The Prometheus counters
+(refused_protected_namespace_total, refused_noisy_probe_namespace_total)
+and the stdout JSON log are never throttled -- only what reaches Loki
+changes. See docs/known-issues.md.
 """
 
 import http.client
@@ -120,9 +134,38 @@ auth_failures_total = Counter(
 )
 isolations_total = Counter("isolations_total", "Real (non-dry-run) pod isolations performed")
 circuit_breaker_trips_total = Counter("circuit_breaker_trips_total", "Times the circuit breaker tripped")
+refused_protected_namespace_total = Counter(
+    "refused_protected_namespace_total",
+    "Refusals for critical-infrastructure namespaces (decision 11), by namespace",
+    ["namespace"],
+)
+refused_noisy_probe_namespace_total = Counter(
+    "refused_noisy_probe_namespace_total",
+    "Refusals for noisy-probe namespaces (decision 11 addendum), by namespace",
+    ["namespace"],
+)
 
 # Decision 4's sliding window: monotonic timestamps of real isolations only.
 _isolation_window: deque[float] = deque()
+
+# Decision 6 addendum: same 5-minute sliding window pattern as decision 4's
+# circuit breaker, but keyed per (namespace, action) and capped at 1 push per
+# window instead of a global count capped at 3 -- gates only the Loki push
+# for refusal-type actions, never the Prometheus counters above or the
+# stdout log. See module docstring and docs/known-issues.md.
+LOKI_REFUSAL_THROTTLE_WINDOW_SECONDS = 300
+_loki_refusal_windows: dict[tuple[str, str], deque[float]] = {}
+
+
+def _loki_refusal_push_allowed(namespace: str, action: str) -> bool:
+    window = _loki_refusal_windows.setdefault((namespace, action), deque())
+    cutoff = time.monotonic() - LOKI_REFUSAL_THROTTLE_WINDOW_SECONDS
+    while window and window[0] < cutoff:
+        window.popleft()
+    if window:
+        return False
+    window.append(time.monotonic())
+    return True
 
 _core_v1 = None
 _networking_v1 = None
@@ -180,13 +223,17 @@ def _push_incident_to_loki(record: dict) -> None:
         logger.warning("failed to push incident to Loki: %s", exc)
 
 
-def log_incident(**fields):
+def log_incident(*, loki_throttle_key: tuple[str, str] | None = None, **fields):
     record = {
         "log_type": "webhook_incident",
         "timestamp": datetime.now(UTC).isoformat(),
         **fields,
     }
     print(json.dumps(record), flush=True)
+    # Decision 6 addendum: throttle only applies when the caller passes a
+    # (namespace, action) key -- refusal actions only, see module docstring.
+    if loki_throttle_key is not None and not _loki_refusal_push_allowed(*loki_throttle_key):
+        return
     _push_incident_to_loki(record)
 
 
@@ -239,12 +286,14 @@ async def webhook(request: Request, authorization: str | None = Header(default=N
     # Decision 11: critical-infrastructure namespaces are an absolute veto,
     # checked first.
     if namespace in CRITICAL_NAMESPACES:
+        refused_protected_namespace_total.labels(namespace=namespace).inc()
         log_incident(
             **common,
             action="refused_protected_namespace",
             result="refused",
             severity="critical",
             latency_ms=None,
+            loki_throttle_key=(namespace, "refused_protected_namespace"),
         )
         return {"status": "refused_protected_namespace"}
 
@@ -252,12 +301,14 @@ async def webhook(request: Request, authorization: str | None = Header(default=N
     # stays distinguishable from decision 11's blast-radius exceptions (see
     # docs/known-issues.md for the security trade-off this implies).
     if namespace in NOISY_PROBE_NAMESPACES:
+        refused_noisy_probe_namespace_total.labels(namespace=namespace).inc()
         log_incident(
             **common,
             action="refused_noisy_probe_namespace",
             result="refused",
             severity="critical",
             latency_ms=None,
+            loki_throttle_key=(namespace, "refused_noisy_probe_namespace"),
         )
         return {"status": "refused_noisy_probe_namespace"}
 

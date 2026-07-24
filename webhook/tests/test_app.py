@@ -11,6 +11,7 @@ def _client(monkeypatch, *, dry_run=True, token="test-token"):
     monkeypatch.setattr(app_module, "WEBHOOK_TOKEN", token)
     monkeypatch.setattr(app_module, "DRY_RUN", dry_run)
     app_module._isolation_window.clear()
+    app_module._loki_refusal_windows.clear()
     return TestClient(app_module.app)
 
 
@@ -186,6 +187,30 @@ def test_loki_connection_is_reused_across_pushes(monkeypatch):
 
     assert len(created) == 1
     assert created[0].request.call_count == 2
+
+
+def test_loki_refusal_push_is_rate_limited_but_counter_still_increments(monkeypatch):
+    client = _client(monkeypatch, dry_run=True)
+    _forbid_k8s(monkeypatch)
+    monkeypatch.setattr(app_module, "_loki_conn", None)
+    mock_conn = MagicMock()
+    mock_conn.getresponse.return_value.read.return_value = b""
+    monkeypatch.setattr(app_module, "_loki_connection", lambda: mock_conn)
+
+    counter = app_module.refused_protected_namespace_total.labels(namespace="vault")
+    before = counter._value.get()
+
+    resp1 = client.post("/webhook", json=_payload(namespace="vault"), headers=AUTH_HEADERS)
+    resp2 = client.post("/webhook", json=_payload(namespace="vault", pod="other-pod"), headers=AUTH_HEADERS)
+
+    assert resp1.json()["status"] == "refused_protected_namespace"
+    assert resp2.json()["status"] == "refused_protected_namespace"
+
+    # Only the first refusal reaches Loki within the 5-minute window.
+    assert mock_conn.request.call_count == 1
+
+    # The Prometheus counter is never throttled -- it increments both times.
+    assert counter._value.get() == before + 2
 
 
 def test_loki_push_failure_does_not_fail_the_request(monkeypatch):
