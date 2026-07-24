@@ -21,7 +21,7 @@ spec:
         runAsUser: 10001
       containers:
         - name: webhook
-          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:a3667cb9d853495c2892ce45f547ca3ec61a8224
+          image: ghcr.io/roniyakam/kubernetes-security-runtime-webhook:c98033330f024146a262181a80d6881e7f13406f
           ports:
             - name: http
               containerPort: 8080
