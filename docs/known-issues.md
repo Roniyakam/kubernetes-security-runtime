@@ -455,15 +455,40 @@ by `test_loki_refusal_push_is_rate_limited_but_counter_still_increments`
 (`webhook/tests/test_app.py`): two refusals for the same
 namespace/action, one Loki push, counter incremented twice.
 
-**Live validation, 2026-07-24**: with the throttle active, `vault`'s
-repeated probe-driven refusals produced exactly one
-`{job="webhook-incidents"}` entry for
-`action="refused_protected_namespace", namespace="vault"` and then
-went quiet in Loki for the remainder of the 5-minute window, while
-`/metrics`' `refused_protected_namespace_total{namespace="vault"}`
-kept climbing in parallel with every probe cycle -- confirming the
-split works exactly as designed: complete quantitative visibility in
-Prometheus, signal-preserving (not signal-losing) visibility in Loki.
+**Live validation, 2026-07-24**: image
+`ghcr.io/roniyakam/kubernetes-security-runtime-webhook:a43c240d4b03e849ff6b34e5210f8ed837b8c1df`
+rolled out via GitOps (ArgoCD auto-sync, `Synced`/`Healthy`). Querying
+`{job="webhook-incidents"} |= "refused_protected_namespace" |= "vault"`
+against Loki directly, restricted to the current pod's lifetime
+(container started 14:02:34Z), returned **exactly one entry**,
+timestamped 14:02:56Z, then nothing for the next ~5 minutes despite
+`vault-0`'s probe firing every ~5s the entire time (confirmed via
+`kubectl logs`, which showed a `refused_protected_namespace` stdout
+line on essentially every cycle, unthrottled as designed). A second
+Loki entry appeared at 14:08:01Z -- 305 seconds after the first, i.e.
+right after the 5-minute window elapsed -- confirming the sliding
+window both throttles within its bound and correctly reopens once it
+expires. Over that same ~5.5-minute span,
+`refused_protected_namespace_total{namespace="vault"}` climbed
+continuously and unthrottled, from 0 (pod start) to 68, confirmed via
+repeated `/metrics` polls every 10s throughout: complete quantitative
+visibility in Prometheus, signal-preserving (not signal-losing,
+exactly 2 entries not 0) visibility in Loki.
+
+**A real, transient behavior was also observed and is worth recording**:
+during the ArgoCD rollout itself (old pod terminating, new pod
+starting, ~13:58:21-13:58:46Z), Loki briefly received a refusal entry
+roughly every 5s instead of one per window. Root cause: this throttle
+is in-memory per pod, exactly like decision 4's circuit breaker
+(see "webhook circuit breaker is in-memory, not persisted" above) --
+for the few seconds both the old and new pod are simultaneously
+Service endpoints during a rolling update, Falcosidekick's requests
+round-robin between two processes each with their own empty-or-primed
+window, so each can independently allow one push. This is a narrow,
+self-resolving artifact of any single rollout (steady state afterwards
+is exactly as designed, confirmed above) and shares its root cause and
+its accepted trade-off with the already-documented in-memory circuit
+breaker -- not a new gap, not fixed separately.
 
 ## S2 — Loki incident visibility (decision 6): label guess was wrong, and the underlying transport doesn't exist (superseded, fixed 2026-07-24)
 
