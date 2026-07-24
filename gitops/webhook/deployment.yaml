@@ -31,7 +31,7 @@ spec:
             # Decision 13 (docs/cadrage-s2-webhook-response.md): dry-run by
             # default. Flipped to "false" only via a committed GitOps change.
             - name: DRY_RUN
-              value: "true"
+              value: "false"
             # Decision 6 (docs/cadrage-s2-webhook-response.md): direct push to
             # Loki's HTTP push API, job="webhook-incidents" (see
             # docs/known-issues.md, "Loki incident visibility" gap and its
