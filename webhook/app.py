@@ -7,10 +7,14 @@ call is made until this is flipped via GitOps (decision 13,
 docs/cadrage-s2-webhook-response.md).
 
 Structured incident logs are written to stdout as JSON with a
-"log_type": "webhook_incident" marker (decision 6) so Promtail/Loki can
-route them to job="webhook-incidents" -- the same stdout-scrape mechanism
-Falcosidekick's own Loki output relies on in S1, not a new transport (see
-docs/known-issues.md).
+"log_type": "webhook_incident" marker (decision 6), and additionally
+pushed directly to Loki's HTTP push API (job="webhook-incidents") --
+the same direct-push pattern Falcosidekick's own Loki output already
+uses for Falco's alerts, since there is no log-shipping agent anywhere
+in this cluster to scrape this pod's stdout (see docs/known-issues.md,
+"Loki incident visibility" gap). The push is fire-and-forget with a
+short timeout: a Loki outage never blocks or fails the underlying
+isolation/release action (fail-open, consistent with decision 5).
 
 /metrics is served twice, deliberately: once on the main FastAPI app
 (port 8080, ClusterIP-only, alongside /webhook and /release) and once via
@@ -26,6 +30,8 @@ import logging
 import os
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from datetime import UTC, datetime
 
@@ -41,6 +47,14 @@ logger = logging.getLogger("webhook")
 
 WEBHOOK_TOKEN = os.environ["WEBHOOK_TOKEN"]
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() == "true"
+
+# Same vm-monitoring Loki instance, same hostport Falcosidekick already
+# pushes to (gitops/falcosidekick/values.yaml's config.loki.hostport) --
+# reachable from the falco namespace via the same UFW-scoped path, no new
+# network rule needed. Default matches that committed value; overridable
+# via GitOps like every other env var here.
+LOKI_PUSH_URL = os.environ.get("LOKI_PUSH_URL", "http://51.15.199.56:3100")
+LOKI_PUSH_TIMEOUT_SECONDS = 2
 
 # Decision 11: blast-radius critical infrastructure, isolating these would
 # break the platform itself, permanent by design.
@@ -101,6 +115,36 @@ def _k8s_clients():
     return _core_v1, _networking_v1
 
 
+def _push_incident_to_loki(record: dict) -> None:
+    # Single static label (job) -- decision 6 asks for job="webhook-incidents"
+    # specifically, not one label per field: the JSON detail stays in the log
+    # line body, never promoted to labels, to avoid the high-cardinality-label
+    # trap (a distinct series per pod_name/namespace/etc.).
+    body = json.dumps(
+        {
+            "streams": [
+                {
+                    "stream": {"job": "webhook-incidents"},
+                    "values": [[str(time.time_ns()), json.dumps(record)]],
+                }
+            ]
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{LOKI_PUSH_URL}/loki/api/v1/push",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(request, timeout=LOKI_PUSH_TIMEOUT_SECONDS)
+    except (urllib.error.URLError, OSError) as exc:
+        # Fail-open (decision 5): Loki being unreachable must never affect
+        # the isolation/release action itself, which has already completed
+        # by the time log_incident() is called.
+        logger.warning("failed to push incident to Loki: %s", exc)
+
+
 def log_incident(**fields):
     record = {
         "log_type": "webhook_incident",
@@ -108,6 +152,7 @@ def log_incident(**fields):
         **fields,
     }
     print(json.dumps(record), flush=True)
+    _push_incident_to_loki(record)
 
 
 def check_auth(authorization: str | None) -> None:

@@ -139,3 +139,48 @@ def test_circuit_breaker_trips_after_three_and_resets_after_window(monkeypatch):
 
     assert resp.json()["status"] == "isolated"
     assert mock_networking.create_namespaced_network_policy.call_count == 4
+
+
+def test_incident_log_pushes_to_loki_with_expected_label_and_body(monkeypatch):
+    client = _client(monkeypatch, dry_run=True)
+    _forbid_k8s(monkeypatch)
+    pushed = {}
+
+    def _fake_urlopen(request, timeout=None):
+        pushed["url"] = request.full_url
+        pushed["timeout"] = timeout
+        pushed["body"] = json.loads(request.data.decode("utf-8"))
+        return MagicMock()
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", _fake_urlopen)
+
+    resp = client.post("/webhook", json=_payload(), headers=AUTH_HEADERS)
+
+    assert resp.json()["status"] == "dry_run_would_isolate"
+    assert pushed["url"] == f"{app_module.LOKI_PUSH_URL}/loki/api/v1/push"
+    assert pushed["timeout"] == app_module.LOKI_PUSH_TIMEOUT_SECONDS
+
+    stream = pushed["body"]["streams"][0]
+    assert stream["stream"] == {"job": "webhook-incidents"}
+
+    [[ts, line]] = stream["values"]
+    assert ts.isdigit()
+    record = json.loads(line)
+    assert record["log_type"] == "webhook_incident"
+    assert record["action"] == "dry_run_would_isolate"
+    assert record["pod_name"] == "test-pod"
+
+
+def test_loki_push_failure_does_not_fail_the_request(monkeypatch):
+    client = _client(monkeypatch, dry_run=True)
+    _forbid_k8s(monkeypatch)
+
+    def _raise_urlopen(request, timeout=None):
+        raise app_module.urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(app_module.urllib.request, "urlopen", _raise_urlopen)
+
+    resp = client.post("/webhook", json=_payload(), headers=AUTH_HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "dry_run_would_isolate"

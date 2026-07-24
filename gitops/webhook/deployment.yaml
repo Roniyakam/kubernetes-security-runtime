@@ -32,6 +32,14 @@ spec:
             # default. Flipped to "false" only via a committed GitOps change.
             - name: DRY_RUN
               value: "true"
+            # Decision 6 (docs/cadrage-s2-webhook-response.md): direct push to
+            # Loki's HTTP push API, job="webhook-incidents" (see
+            # docs/known-issues.md, "Loki incident visibility" gap and its
+            # fix). Same vm-monitoring host/port already committed in
+            # gitops/falcosidekick/values.yaml's config.loki.hostport -- not
+            # a new endpoint, no new UFW rule.
+            - name: LOKI_PUSH_URL
+              value: "http://51.15.199.56:3100"
             - name: WEBHOOK_TOKEN
               valueFrom:
                 secretKeyRef:
