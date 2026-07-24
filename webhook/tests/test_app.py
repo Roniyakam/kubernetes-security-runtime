@@ -143,23 +143,20 @@ def test_circuit_breaker_trips_after_three_and_resets_after_window(monkeypatch):
 def test_incident_log_pushes_to_loki_with_expected_label_and_body(monkeypatch):
     client = _client(monkeypatch, dry_run=True)
     _forbid_k8s(monkeypatch)
-    pushed = {}
-
-    def _fake_urlopen(request, timeout=None):
-        pushed["url"] = request.full_url
-        pushed["timeout"] = timeout
-        pushed["body"] = json.loads(request.data.decode("utf-8"))
-        return MagicMock()
-
-    monkeypatch.setattr(app_module.urllib.request, "urlopen", _fake_urlopen)
+    monkeypatch.setattr(app_module, "_loki_conn", None)
+    mock_conn = MagicMock()
+    mock_conn.getresponse.return_value.read.return_value = b""
+    monkeypatch.setattr(app_module, "_loki_connection", lambda: mock_conn)
 
     resp = client.post("/webhook", json=_payload(), headers=AUTH_HEADERS)
 
     assert resp.json()["status"] == "dry_run_would_isolate"
-    assert pushed["url"] == f"{app_module.LOKI_PUSH_URL}/loki/api/v1/push"
-    assert pushed["timeout"] == app_module.LOKI_PUSH_TIMEOUT_SECONDS
+    _, kwargs = mock_conn.request.call_args
+    assert mock_conn.request.call_args[0] == ("POST", "/loki/api/v1/push")
+    assert kwargs["headers"] == {"Content-Type": "application/json"}
 
-    stream = pushed["body"]["streams"][0]
+    body = json.loads(kwargs["body"].decode("utf-8"))
+    stream = body["streams"][0]
     assert stream["stream"] == {"job": "webhook-incidents"}
 
     [[ts, line]] = stream["values"]
@@ -170,14 +167,34 @@ def test_incident_log_pushes_to_loki_with_expected_label_and_body(monkeypatch):
     assert record["pod_name"] == "test-pod"
 
 
+def test_loki_connection_is_reused_across_pushes(monkeypatch):
+    client = _client(monkeypatch, dry_run=True)
+    _forbid_k8s(monkeypatch)
+    monkeypatch.setattr(app_module, "_loki_conn", None)
+    created = []
+
+    def _fake_http_connection(host, port, timeout=None):
+        conn = MagicMock()
+        conn.getresponse.return_value.read.return_value = b""
+        created.append(conn)
+        return conn
+
+    monkeypatch.setattr(app_module.http.client, "HTTPConnection", _fake_http_connection)
+
+    client.post("/webhook", json=_payload(pod="pod-a"), headers=AUTH_HEADERS)
+    client.post("/webhook", json=_payload(pod="pod-b"), headers=AUTH_HEADERS)
+
+    assert len(created) == 1
+    assert created[0].request.call_count == 2
+
+
 def test_loki_push_failure_does_not_fail_the_request(monkeypatch):
     client = _client(monkeypatch, dry_run=True)
     _forbid_k8s(monkeypatch)
-
-    def _raise_urlopen(request, timeout=None):
-        raise app_module.urllib.error.URLError("connection refused")
-
-    monkeypatch.setattr(app_module.urllib.request, "urlopen", _raise_urlopen)
+    monkeypatch.setattr(app_module, "_loki_conn", None)
+    mock_conn = MagicMock()
+    mock_conn.request.side_effect = OSError("connection refused")
+    monkeypatch.setattr(app_module, "_loki_connection", lambda: mock_conn)
 
     resp = client.post("/webhook", json=_payload(), headers=AUTH_HEADERS)
 

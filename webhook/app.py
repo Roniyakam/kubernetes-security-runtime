@@ -16,6 +16,18 @@ in this cluster to scrape this pod's stdout (see docs/known-issues.md,
 short timeout: a Loki outage never blocks or fails the underlying
 isolation/release action (fail-open, consistent with decision 5).
 
+The push reuses one persistent http.client.HTTPConnection (module-level
+_loki_conn) instead of opening a new connection per push. This isn't an
+optimization -- a fresh connection per call was live-validated to make
+this pod's own egress to Loki repeatedly re-trip Falco's "Unexpected
+Outbound Connection" rule on itself (namespace=falco is protected, so
+never a real isolation, but every refusal's log_incident() call opened
+another new connection, tripping another alert, in a self-sustaining
+loop). Reusing one connection means the TCP handshake -- the thing the
+rule actually detects -- happens once per pod lifetime, matching how
+Falcosidekick's own long-lived Loki output connection behaves. See
+docs/known-issues.md.
+
 /metrics is served twice, deliberately: once on the main FastAPI app
 (port 8080, ClusterIP-only, alongside /webhook and /release) and once via
 prometheus_client's own standalone server (port 9090, main() below). Only
@@ -25,15 +37,15 @@ cluster network, so only a metrics-only port does. See
 docs/known-issues.md.
 """
 
+import http.client
 import json
 import logging
 import os
 import sys
 import time
-import urllib.error
-import urllib.request
 from collections import deque
 from datetime import UTC, datetime
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -60,6 +72,11 @@ DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() == "true"
 # via GitOps like every other env var here.
 LOKI_PUSH_URL = os.environ.get("LOKI_PUSH_URL", "http://51.15.199.56:3100")
 LOKI_PUSH_TIMEOUT_SECONDS = 2
+_loki_push_host = urlsplit(LOKI_PUSH_URL)
+
+# Reused across pushes -- see module docstring for why a fresh connection
+# per push is not just wasteful but actively harmful here.
+_loki_conn: http.client.HTTPConnection | None = None
 
 # Decision 11: blast-radius critical infrastructure, isolating these would
 # break the platform itself, permanent by design.
@@ -120,6 +137,15 @@ def _k8s_clients():
     return _core_v1, _networking_v1
 
 
+def _loki_connection() -> http.client.HTTPConnection:
+    global _loki_conn
+    if _loki_conn is None:
+        _loki_conn = http.client.HTTPConnection(
+            _loki_push_host.hostname, _loki_push_host.port, timeout=LOKI_PUSH_TIMEOUT_SECONDS
+        )
+    return _loki_conn
+
+
 def _push_incident_to_loki(record: dict) -> None:
     # Single static label (job) -- decision 6 asks for job="webhook-incidents"
     # specifically, not one label per field: the JSON detail stays in the log
@@ -135,18 +161,22 @@ def _push_incident_to_loki(record: dict) -> None:
             ]
         }
     ).encode("utf-8")
-    request = urllib.request.Request(
-        f"{LOKI_PUSH_URL}/loki/api/v1/push",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        urllib.request.urlopen(request, timeout=LOKI_PUSH_TIMEOUT_SECONDS)
-    except (urllib.error.URLError, OSError) as exc:
+        conn = _loki_connection()
+        conn.request(
+            "POST",
+            "/loki/api/v1/push",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        conn.getresponse().read()
+    except (OSError, http.client.HTTPException) as exc:
         # Fail-open (decision 5): Loki being unreachable must never affect
         # the isolation/release action itself, which has already completed
-        # by the time log_incident() is called.
+        # by the time log_incident() is called. Drop the connection so the
+        # next push reconnects instead of reusing a broken socket.
+        global _loki_conn
+        _loki_conn = None
         logger.warning("failed to push incident to Loki: %s", exc)
 
 
